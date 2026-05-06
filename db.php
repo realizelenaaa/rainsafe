@@ -2,10 +2,17 @@
 
 declare(strict_types=1);
 
-const DB_HOST = '127.0.0.1';
-const DB_NAME = 'rainsafe';
-const DB_USER = 'root';
-const DB_PASS = '';
+$configPath = __DIR__ . '/config.local.php';
+if (!is_file($configPath)) {
+    $configPath = __DIR__ . '/config.example.php';
+}
+
+$config = require $configPath;
+
+define('DB_HOST', (string) $config['db_host']);
+define('DB_NAME', (string) $config['db_name']);
+define('DB_USER', (string) $config['db_user']);
+define('DB_PASS', (string) $config['db_pass']);
 
 function get_pdo(): PDO
 {
@@ -28,7 +35,7 @@ function get_pdo(): PDO
     return $pdo;
 }
 
-function log_activity(int $userId, string $action, string $details = ''): void
+function log_activity(int $userId, string $action, string $details = ''): bool
 {
     try {
         $pdo = get_pdo();
@@ -41,7 +48,11 @@ function log_activity(int $userId, string $action, string $details = ''): void
             ':action'  => $action,
             ':details' => $details,
         ]);
+
+        return true;
     } catch (Throwable $e) {
         error_log('Activity log failed: ' . $e->getMessage());
+
+        return false;
     }
 }

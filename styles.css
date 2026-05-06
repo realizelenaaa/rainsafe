@@ -14,9 +14,7 @@
   --shadow-soft: 0 18px 45px rgba(15, 23, 42, 0.12);
 }
 
-*,
-*::before,
-*::after {
+*, *::before, *::after {
   box-sizing: border-box;
 }
 
@@ -92,14 +90,88 @@ body {
   border: 1px solid rgba(148, 163, 184, 0.5);
 }
 
+/* User Dashboard Layout */
+.user-panels {
+  display: grid;
+  gap: 1.4rem;
+  margin-top: 0.75rem;
+}
+
+.user-panel {
+  background: radial-gradient(circle at top left, #eff6ff 0, #ffffff 55%);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-soft);
+  padding: 2rem;
+  border: 1px solid rgba(148, 163, 184, 0.35);
+}
+
+.side-nav {
+  display: flex;
+  gap: 0.5rem;
+  margin-bottom: 1.5rem;
+  flex-wrap: wrap;
+}
+
+.side-tab {
+  border-radius: 999px;
+  border: 1px solid transparent;
+  padding: 0.6rem 1.2rem;
+  background: #f3f4f6;
+  cursor: pointer;
+  font-size: 0.9rem;
+  color: var(--muted);
+  transition: all 0.15s ease;
+}
+
+.side-tab:hover {
+  background: rgba(37, 99, 235, 0.1);
+  color: var(--accent-strong);
+}
+
+.side-tab-active {
+  background: #ffffff;
+  color: var(--accent-strong);
+  border-color: rgba(37, 99, 235, 0.8);
+  box-shadow: 0 2px 8px rgba(37, 99, 235, 0.2);
+}
+
+/* Ensure maps display properly (Leaflet needs explicit size + stacking) */
+#userSubmitMap, #userReportsMap, #adminReportsMap {
+  min-height: 400px;
+  width: 100%;
+  min-width: 0;
+  position: relative;
+  background-color: #e8eaee;
+  border-radius: 10px;
+}
+
+.leaflet-container {
+  z-index: 2;
+  font-family: inherit;
+  border-radius: 10px;
+  width: 100%;
+  height: 100%;
+  min-height: 280px;
+  background: #dde2e8;
+}
+
+.leaflet-tile-pane img {
+  max-width: none !important;
+}
+
+/* Make sure the map container is visible */
+.main-layout {
+  position: relative;
+  z-index: 1;
+}
+
 .main-layout {
   max-width: 1200px;
   margin: 2rem auto 3rem;
   padding: 0 1.5rem;
 }
 
-.view-card,
-.panel {
+.view-card, .panel {
   background: radial-gradient(circle at top left, #eff6ff 0, #ffffff 55%);
   border-radius: var(--radius-lg);
   box-shadow: var(--shadow-soft);
@@ -110,60 +182,6 @@ body {
 .view-card {
   max-width: 820px;
   margin: 0 auto;
-}
-
-.view-grid {
-  display: grid;
-  grid-template-columns: minmax(0, 1.25fr) minmax(0, 1.1fr);
-  gap: 1.75rem;
-}
-
-.user-grid {
-  grid-template-columns: 260px minmax(0, 1fr);
-  align-items: flex-start;
-}
-
-.user-panels {
-  display: grid;
-  gap: 1.25rem;
-}
-
-.side-nav {
-  display: flex;
-  flex-direction: column;
-  gap: 0.5rem;
-  align-self: flex-start;
-  padding: 0.75rem;
-  border-radius: var(--radius-lg);
-  background: radial-gradient(circle at top left, #eff6ff 0, #ffffff 55%);
-  box-shadow: var(--shadow-soft);
-  border: 1px solid rgba(148, 163, 184, 0.35);
-}
-
-.side-tab {
-  border-radius: 999px;
-  border: 1px solid transparent;
-  padding: 0.45rem 0.9rem;
-  background: transparent;
-  cursor: pointer;
-  text-align: left;
-  font-size: 0.9rem;
-  color: var(--muted);
-  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease,
-    transform 0.08s ease;
-}
-
-.side-tab:hover {
-  background: rgba(37, 99, 235, 0.05);
-  color: var(--accent-strong);
-}
-
-.side-tab-active {
-  background: #ffffff;
-  color: var(--accent-strong);
-  border-color: rgba(37, 99, 235, 0.8);
-  box-shadow: 0 8px 18px rgba(37, 99, 235, 0.28);
-  transform: translateX(1px);
 }
 
 .admin-dashboard {
@@ -199,6 +217,32 @@ body {
   color: var(--accent-strong);
   border-color: rgba(37, 99, 235, 0.9);
   box-shadow: 0 6px 14px rgba(37, 99, 235, 0.35);
+}
+
+.side-tab {
+  border-radius: 999px;
+  border: 1px solid transparent;
+  padding: 0.45rem 0.9rem;
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+  font-size: 0.9rem;
+  color: var(--muted);
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease,
+    transform 0.08s ease;
+}
+
+.side-tab:hover {
+  background: rgba(37, 99, 235, 0.05);
+  color: var(--accent-strong);
+}
+
+.side-tab-active {
+  background: #ffffff;
+  color: var(--accent-strong);
+  border-color: rgba(37, 99, 235, 0.8);
+  box-shadow: 0 8px 18px rgba(37, 99, 235, 0.28);
+  transform: translateX(1px);
 }
 
 .admin-panels {
@@ -258,9 +302,7 @@ label {
   font-weight: 500;
 }
 
-input,
-select,
-textarea {
+input, select, textarea {
   font: inherit;
   padding: 0.6rem 0.75rem;
   border-radius: var(--radius-md);
@@ -270,9 +312,7 @@ textarea {
     background-color 0.15s ease;
 }
 
-input:focus,
-select:focus,
-textarea:focus {
+input:focus, select:focus, textarea:focus {
   outline: none;
   border-color: rgba(37, 99, 235, 0.85);
   box-shadow: 0 0 0 1px rgba(37, 99, 235, 0.6);
@@ -385,8 +425,7 @@ textarea {
   font-size: 0.8rem;
 }
 
-.divider::before,
-.divider::after {
+.divider::before, .divider::after {
   content: "";
   flex: 1;
   height: 1px;
@@ -497,7 +536,7 @@ textarea {
   display: flex;
   gap: 0.5rem;
   align-items: center;
-   flex-wrap: nowrap;
+  flex-wrap: nowrap;
   min-width: 0;
 }
 
@@ -519,8 +558,7 @@ textarea {
   margin-top: 0.5rem;
 }
 
-.table th,
-.table td {
+.table th, .table td {
   padding: 0.6rem 0.4rem;
   border-bottom: 1px solid #e5e7eb;
   text-align: left;
@@ -554,6 +592,37 @@ textarea {
   display: none !important;
 }
 
+/* Stats Grid Styles */
+.stats-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
+  gap: 2rem;
+  margin-top: 1rem;
+}
+
+.stat-card {
+  background: white;
+  border-radius: var(--radius-md);
+  padding: 1.5rem;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.05);
+  border: 1px solid var(--border);
+}
+
+.stat-card.full-width {
+  grid-column: 1 / -1;
+}
+
+.stat-card h3 {
+  margin: 0 0 1rem 0;
+  font-size: 1.1rem;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.stat-card canvas {
+  max-height: 400px;
+}
+
 @media (max-width: 1100px) {
   .view-header-row {
     flex-direction: column;
@@ -568,6 +637,10 @@ textarea {
   .filters select {
     flex: 1;
     min-width: 120px;
+  }
+  
+  .stats-grid {
+    grid-template-columns: 1fr;
   }
 }
 
@@ -587,13 +660,7 @@ textarea {
 }
 
 @media (max-width: 900px) {
-  .view-grid,
-  .user-grid {
-    grid-template-columns: minmax(0, 1fr);
-  }
-
-  .view-card,
-  .panel {
+  .view-card, .panel {
     padding: 1.4rem 1.2rem 1.5rem;
   }
 
@@ -622,18 +689,8 @@ textarea {
     align-items: flex-start;
   }
 
-  .view-header-row > div:first-child {
-  flex: 1;
-  min-width: 200px;
-}
-
   .filters {
     width: 100%;
-    flex-wrap: wrap;
-  }
-
-  .side-nav {
-    flex-direction: row;
     flex-wrap: wrap;
   }
 }

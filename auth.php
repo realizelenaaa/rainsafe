@@ -1,13 +1,10 @@
 <?php
 declare(strict_types=1);
 
-session_start();
+require_once __DIR__ . '/session_init.php';
+require_once __DIR__ . '/http_headers.php';
 
-header('Content-Type: application/json; charset=utf-8');
-header('Access-Control-Allow-Origin: *');
-header('Access-Control-Allow-Credentials: true');
-header('Access-Control-Allow-Headers: Content-Type');
-header('Access-Control-Allow-Methods: GET, POST, OPTIONS');
+send_json_cors_headers();
 
 if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
     http_response_code(200);
@@ -15,6 +12,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
 }
 
 require_once __DIR__ . '/db.php';
+require_once __DIR__ . '/csrf.php';
 
 function json_input(): array
 {
@@ -44,6 +42,8 @@ function respond(array $payload, int $statusCode = 200): void
 
 function handle_signup(): void
 {
+    // Login/signup intentionally omit CSRF: the session may not have a token yet
+    // (e.g. user submits before the session GET finishes). Other actions use CSRF.
     $data = json_input();
     $email = isset($data['email']) ? trim((string) $data['email']) : '';
     $password = isset($data['password']) ? (string) $data['password'] : '';
@@ -133,6 +133,7 @@ function handle_login(): void
 
 function handle_logout(): void
 {
+    require_csrf();
     $user = current_user();
 
     if ($user) {
@@ -164,11 +165,12 @@ function handle_logout(): void
 function handle_session(): void
 {
     $user = current_user();
-    if (!$user) {
-        respond(['user' => null]);
+    $payload = ['user' => $user];
+    if (isset($_SESSION['csrf_token'])) {
+        $payload['csrf_token'] = $_SESSION['csrf_token'];
     }
 
-    respond(['user' => $user]);
+    respond($payload);
 }
 
 $action = isset($_GET['action']) ? $_GET['action'] : '';

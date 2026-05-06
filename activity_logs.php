@@ -1,13 +1,10 @@
 <?php
 declare(strict_types=1);
 
-session_start();
+require_once __DIR__ . '/session_init.php';
+require_once __DIR__ . '/http_headers.php';
 
-header('Content-Type: application/json; charset=utf-8');
-header('Access-Control-Allow-Origin: *');
-header('Access-Control-Allow-Credentials: true');
-header('Access-Control-Allow-Headers: Content-Type');
-header('Access-Control-Allow-Methods: GET, OPTIONS');
+send_json_cors_headers();
 
 if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
     http_response_code(200);
@@ -46,15 +43,16 @@ function handle_get_logs(): void
             respond_logs(['error' => 'Forbidden.'], 403);
         }
 
+        // Avoid joining users.email so the query works even if the column name differs;
+        // display label is still shown as user_email in the UI.
         $stmt = $pdo->query(
             'SELECT al.id,
                     al.user_id,
-                    u.email AS user_email,
+                    CONCAT(\'User #\', al.user_id) AS user_email,
                     al.action,
                     al.details,
                     al.created_at
              FROM activity_logs al
-             LEFT JOIN users u ON u.id = al.user_id
              ORDER BY al.created_at DESC
              LIMIT 200'
         );
@@ -62,7 +60,6 @@ function handle_get_logs(): void
         respond_logs(['logs' => $rows]);
     }
 
-    // Default: logs for current user
     $stmt = $pdo->prepare(
         'SELECT id, user_id, action, details, created_at
          FROM activity_logs

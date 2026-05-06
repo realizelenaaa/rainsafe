@@ -1,13 +1,10 @@
 <?php
 declare(strict_types=1);
 
-session_start();
+require_once __DIR__ . '/session_init.php';
+require_once __DIR__ . '/http_headers.php';
 
-header('Content-Type: application/json; charset=utf-8');
-header('Access-Control-Allow-Origin: *');
-header('Access-Control-Allow-Credentials: true');
-header('Access-Control-Allow-Headers: Content-Type');
-header('Access-Control-Allow-Methods: GET, POST, OPTIONS');
+send_json_cors_headers();
 
 if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
     http_response_code(200);
@@ -15,6 +12,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
 }
 
 require_once __DIR__ . '/db.php';
+require_once __DIR__ . '/csrf.php';
 
 function json_input_reports(): array
 {
@@ -61,16 +59,16 @@ function handle_get_reports(): void
         $params     = [];
 
         if (!empty($_GET['severity'])) {
+            $sev = (string) $_GET['severity'];
+            $allowedFilter = ['Low', 'Medium', 'High'];
+            if (!in_array($sev, $allowedFilter, true)) {
+                respond_reports(['error' => 'Invalid severity filter.'], 400);
+            }
             $conditions[]      = 'severity = :severity';
-            $params['severity'] = $_GET['severity'];
+            $params['severity'] = $sev;
         }
 
-        if (!empty($_GET['hazard_type'])) {
-            $conditions[]          = 'hazard_type = :hazard_type';
-            $params['hazard_type'] = $_GET['hazard_type'];
-        }
-
-        $sql = 'SELECT id, user_id, location, hazard_type, severity, description, reporter_name, created_at
+        $sql = 'SELECT id, user_id, location, severity, description, reporter_name, latitude, longitude, polygon_coords, created_at
                 FROM reports';
 
         if ($conditions) {
@@ -86,11 +84,18 @@ function handle_get_reports(): void
         $stmt->execute();
 
         $rows = $stmt->fetchAll();
+
+        foreach ($rows as &$row) {
+            if ($row['polygon_coords']) {
+                $row['polygon_coords'] = json_decode($row['polygon_coords'], true);
+            }
+        }
+
         respond_reports(['reports' => $rows]);
     }
 
     $stmt = $pdo->prepare(
-        'SELECT id, user_id, location, hazard_type, severity, description, reporter_name, created_at
+        'SELECT id, user_id, location, severity, description, reporter_name, latitude, longitude, polygon_coords, created_at
          FROM reports
          WHERE user_id = :user_id
          ORDER BY created_at DESC'
@@ -98,51 +103,104 @@ function handle_get_reports(): void
     $stmt->execute([':user_id' => (int) $user['id']]);
     $rows = $stmt->fetchAll();
 
+    foreach ($rows as &$row) {
+        if ($row['polygon_coords']) {
+            $row['polygon_coords'] = json_decode($row['polygon_coords'], true);
+        }
+    }
+
     respond_reports(['reports' => $rows]);
 }
 
 function handle_post_report(): void
 {
+    require_csrf();
     $user = require_auth();
     $pdo  = get_pdo();
 
     $data = json_input_reports();
 
     $location      = isset($data['location']) ? trim((string) $data['location']) : '';
-    $hazardType    = isset($data['hazard_type']) ? trim((string) $data['hazard_type']) : '';
     $severity      = isset($data['severity']) ? trim((string) $data['severity']) : '';
     $description   = isset($data['description']) ? trim((string) $data['description']) : '';
     $reporterName  = isset($data['reporter_name']) ? trim((string) $data['reporter_name']) : '';
+    $latitude      = isset($data['latitude']) ? (float) $data['latitude'] : null;
+    $longitude     = isset($data['longitude']) ? (float) $data['longitude'] : null;
+    $polygonCoords = isset($data['polygon_coords']) ? json_encode($data['polygon_coords']) : null;
 
-    if ($location === '' || $hazardType === '' || $severity === '') {
-        respond_reports(['error' => 'Location, hazard type, and severity are required.'], 400);
+    if ($location === '' || $severity === '') {
+        respond_reports(['error' => 'Location and severity are required.'], 400);
+    }
+
+    $allowedSeverities = ['Low', 'Medium', 'High'];
+    if (!in_array($severity, $allowedSeverities, true)) {
+        respond_reports(['error' => 'Invalid severity value.'], 400);
     }
 
     $stmt = $pdo->prepare(
-        'INSERT INTO reports (user_id, location, hazard_type, severity, description, reporter_name, created_at)
-         VALUES (:user_id, :location, :hazard_type, :severity, :description, :reporter_name, NOW())'
+        'INSERT INTO reports (user_id, location, severity, description, reporter_name, latitude, longitude, polygon_coords, created_at)
+         VALUES (:user_id, :location, :severity, :description, :reporter_name, :latitude, :longitude, :polygon_coords, NOW())'
     );
 
-    $stmt->execute([
-        ':user_id'      => (int) $user['id'],
-        ':location'     => $location,
-        ':hazard_type'  => $hazardType,
-        ':severity'     => $severity,
-        ':description'  => $description,
-        ':reporter_name'=> $reporterName,
-    ]);
+    try {
+        $stmt->execute([
+            ':user_id'        => (int) $user['id'],
+            ':location'       => $location,
+            ':severity'       => $severity,
+            ':description'    => $description,
+            ':reporter_name'  => $reporterName,
+            ':latitude'       => $latitude,
+            ':longitude'      => $longitude,
+            ':polygon_coords' => $polygonCoords,
+        ]);
+    } catch (PDOException $e) {
+        error_log('reports INSERT failed: ' . $e->getMessage());
+        respond_reports([
+            'error' => 'Could not save the report. If this is a new install, run database/update_reports_table.sql in MySQL to add missing columns.',
+        ], 500);
+    }
 
     log_activity(
         (int) $user['id'],
         'submitted_report',
-        sprintf('Reported "%s" (%s) at "%s".', $hazardType, $severity, $location)
+        sprintf('Reported "%s" at "%s".', $severity, $location)
     );
 
     respond_reports(['message' => 'Report submitted successfully.']);
 }
 
+function handle_get_stats(): void
+{
+    $user = require_auth();
+
+    if ($user['role'] !== 'admin') {
+        respond_reports(['error' => 'Forbidden.'], 403);
+    }
+
+    $pdo = get_pdo();
+
+    $stmt = $pdo->query('SELECT severity, COUNT(*) as count FROM reports GROUP BY severity');
+    $severityStats = $stmt->fetchAll();
+
+    $stmt = $pdo->query("SELECT DATE_FORMAT(created_at, '%Y-%m') as month, COUNT(*) as count FROM reports GROUP BY month ORDER BY month DESC LIMIT 12");
+    $monthlyTrends = $stmt->fetchAll();
+
+    $stmt = $pdo->query('SELECT location, COUNT(*) as count FROM reports GROUP BY location ORDER BY count DESC LIMIT 10');
+    $topLocations = $stmt->fetchAll();
+
+    respond_reports([
+        'severity_stats' => $severityStats,
+        'monthly_trends' => $monthlyTrends,
+        'top_locations' => $topLocations
+    ]);
+}
+
 if ($_SERVER['REQUEST_METHOD'] === 'GET') {
-    handle_get_reports();
+    if (isset($_GET['stats']) && $_GET['stats'] === 'true') {
+        handle_get_stats();
+    } else {
+        handle_get_reports();
+    }
 }
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {

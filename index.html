@@ -11,6 +11,10 @@
       href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap"
       rel="stylesheet"
     />
+    <!-- Leaflet CSS -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <!-- Chart.js -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
   </head>
   <body>
     <header class="top-bar">
@@ -102,7 +106,7 @@
 
       <!-- USER DASHBOARD -->
       <section id="userDashboardView" class="panel admin-dashboard hidden">
-        <nav class="top-tabs" id="userSideNav">
+        <nav class="side-nav" id="userSideNav">
           <button class="side-tab side-tab-active" data-user-tab="submit">
             Submit Report
           </button>
@@ -112,11 +116,14 @@
           <button class="side-tab" data-user-tab="activity">
             Activity Logs
           </button>
+          <button class="side-tab" data-user-tab="map">
+            Map View
+          </button>
         </nav>
 
-        <div class="admin-panels">
+        <div class="user-panels">
           <section
-            class="panel admin-panel-group"
+            class="panel user-panel"
             data-user-tab-panel="submit"
           >
             <div class="view-header">
@@ -129,7 +136,7 @@
 
             <form id="reportForm" class="form">
               <div class="form-group">
-                <label for="location">Location</label>
+                <label for="location">Location Name</label>
                 <input
                   type="text"
                   id="location"
@@ -139,18 +146,14 @@
               </div>
 
               <div class="form-group">
-                <label for="hazardType">Hazard Type</label>
-                <select id="hazardType" required>
-                  <option value="">Select hazard type</option>
-                  <option value="Flooding / Water Accumulation">
-                    Flooding / Water Accumulation
-                  </option>
-                  <option value="Slippery Surface">Slippery Surface</option>
-                  <option value="Mud / Erosion">Mud / Erosion</option>
-                  <option value="Obstruction / Debris">
-                    Obstruction / Debris
-                  </option>
-                </select>
+                <label>Pin Location on Map</label>
+                <div id="userSubmitMap" style="height: 400px; border-radius: 10px; margin-bottom: 10px;"></div>
+                <div style="display: flex; gap: 10px; margin-top: 5px;">
+                  <button type="button" id="useMyLocationBtn" class="btn btn-outline">📍 Use My Location</button>
+                  <button type="button" id="clearLocationBtn" class="btn btn-outline">🗑️ Clear Location</button>
+                </div>
+                <small class="muted">Click anywhere on the map to pin the exact location of the hazard</small>
+                <div id="selectedLocationCoords" class="muted" style="margin-top: 5px; font-size: 0.8rem;"></div>
               </div>
 
               <div class="form-group">
@@ -190,7 +193,7 @@
               </div>
 
               <div class="form-group">
-                <label for="reporterName">Name</label>
+                <label for="reporterName">Name (Optional)</label>
                 <input
                   type="text"
                   id="reporterName"
@@ -243,6 +246,20 @@
               <p class="muted">No activity yet.</p>
             </div>
           </section>
+
+          <!-- USER MAP TAB -->
+          <section
+            class="panel user-panel hidden"
+            data-user-tab-panel="map"
+          >
+            <div class="view-header">
+              <h2>All Reports Map</h2>
+              <p class="muted">
+                View all reported hazard locations on campus.
+              </p>
+            </div>
+            <div id="userReportsMap" style="height: 500px; border-radius: 10px;"></div>
+          </section>
         </div>
       </section>
 
@@ -251,6 +268,9 @@
         <nav class="top-tabs" id="adminTopNav">
           <button class="top-tab top-tab-active" data-admin-tab="reports">
             Reports
+          </button>
+          <button class="top-tab" data-admin-tab="analytics">
+            Analytics
           </button>
           <button class="top-tab" data-admin-tab="activity">
             Activity Logs
@@ -277,17 +297,6 @@
                     <option value="Medium">Medium</option>
                     <option value="High">High</option>
                   </select>
-                  <select id="adminHazardFilter">
-                    <option value="">All Hazards</option>
-                    <option value="Flooding / Water Accumulation">
-                      Flooding / Water Accumulation
-                    </option>
-                    <option value="Slippery Surface">Slippery Surface</option>
-                    <option value="Mud / Erosion">Mud / Erosion</option>
-                    <option value="Obstruction / Debris">
-                      Obstruction / Debris
-                    </option>
-                  </select>
                   <button id="adminRefreshBtn" class="btn btn-outline">
                     Refresh
                   </button>
@@ -298,6 +307,16 @@
                   No reports found. Ask students to submit pathway concerns.
                 </p>
               </div>
+            </section>
+
+            <section class="panel panel-nested">
+              <div class="view-header">
+                <h2>High-Risk Locations Map</h2>
+                <p class="muted">
+                  Locations with reported hazards. Click on markers for details.
+                </p>
+              </div>
+              <div id="adminReportsMap" style="height: 500px; border-radius: 10px;"></div>
             </section>
 
             <section class="panel panel-nested">
@@ -321,6 +340,37 @@
                   <!-- Filled in by JS -->
                 </tbody>
               </table>
+            </section>
+          </div>
+
+          <div
+            class="admin-panel-group hidden"
+            data-admin-tab-panel="analytics"
+          >
+            <section class="panel panel-nested">
+              <div class="view-header">
+                <h2>Analytics Dashboard</h2>
+                <p class="muted">
+                  View statistics and trends for reported hazards.
+                </p>
+              </div>
+              
+              <div class="stats-grid">
+                <div class="stat-card">
+                  <h3>Severity Distribution</h3>
+                  <canvas id="severityChart" width="400" height="400"></canvas>
+                </div>
+                
+                <div class="stat-card">
+                  <h3>Monthly Trends</h3>
+                  <canvas id="monthlyTrendsChart" width="400" height="400"></canvas>
+                </div>
+                
+                <div class="stat-card full-width">
+                  <h3>Top 10 Locations by Report Count</h3>
+                  <canvas id="topLocationsChart" width="800" height="400"></canvas>
+                </div>
+              </div>
             </section>
           </div>
 
@@ -351,6 +401,8 @@
       </p>
     </footer>
 
+    <!-- Leaflet JS -->
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
     <script src="app.js"></script>
   </body>
 </html>
