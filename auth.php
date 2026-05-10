@@ -100,17 +100,25 @@ function handle_login(): void
 
     $pdo = get_pdo();
 
-    $stmt = $pdo->prepare(
-        'SELECT id, email, password_hash, role, created_at
-         FROM users
-         WHERE email = ?
-         LIMIT 1'
-    );
+    $hasSuspendedColumn = db_column_exists('users', 'is_suspended');
+    $loginSql = $hasSuspendedColumn
+        ? 'SELECT id, email, password_hash, role, created_at, is_suspended
+           FROM users
+           WHERE email = ?
+           LIMIT 1'
+        : 'SELECT id, email, password_hash, role, created_at
+           FROM users
+           WHERE email = ?
+           LIMIT 1';
+    $stmt = $pdo->prepare($loginSql);
     $stmt->execute([$email]);
     $row = $stmt->fetch();
 
     if (!$row || !password_verify($password, $row['password_hash'])) {
         respond(['error' => 'Invalid email or password.'], 401);
+    }
+    if ($hasSuspendedColumn && (int) ($row['is_suspended'] ?? 0) === 1) {
+        respond(['error' => 'Your account is suspended. Please contact admin.'], 403);
     }
 
     $user = [
@@ -165,6 +173,29 @@ function handle_logout(): void
 function handle_session(): void
 {
     $user = current_user();
+    if ($user && db_column_exists('users', 'is_suspended')) {
+        $pdo = get_pdo();
+        $stmt = $pdo->prepare('SELECT is_suspended FROM users WHERE id = :id LIMIT 1');
+        $stmt->execute([':id' => (int) $user['id']]);
+        $row = $stmt->fetch();
+        if ($row && (int) ($row['is_suspended'] ?? 0) === 1) {
+            $_SESSION = [];
+            if (ini_get('session.use_cookies')) {
+                $params = session_get_cookie_params();
+                setcookie(
+                    session_name(),
+                    '',
+                    time() - 42000,
+                    $params['path'],
+                    $params['domain'],
+                    $params['secure'],
+                    $params['httponly']
+                );
+            }
+            session_destroy();
+            $user = null;
+        }
+    }
     $payload = ['user' => $user];
     if (isset($_SESSION['csrf_token'])) {
         $payload['csrf_token'] = $_SESSION['csrf_token'];

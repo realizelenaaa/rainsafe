@@ -48,6 +48,17 @@
                     </button>
                   </div>
                 </div>
+                <div class="side-nav" id="adminReportsSubNav" style="margin-top: -0.4rem; margin-bottom: 0.9rem;">
+                  <button class="side-tab side-tab-active" type="button" data-admin-reports-view="active">
+                    Active Reports
+                  </button>
+                  <button class="side-tab" type="button" data-admin-reports-view="false">
+                    False Reports
+                  </button>
+                  <button class="side-tab" type="button" data-admin-reports-view="suspended">
+                    Suspended Accounts
+                  </button>
+                </div>
                 <div id="adminReportsList" class="cards-list empty-state">
                   <p class="muted">
                     No reports found. Ask students to submit pathway concerns.
@@ -264,6 +275,70 @@
           </div>
         </footer>
       </aside>
+
+      <div id="adminEditReportModalBackdrop" class="admin-modal-backdrop hidden" aria-hidden="true"></div>
+      <section
+        id="adminEditReportModal"
+        class="admin-modal hidden"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="adminEditReportModalTitle"
+        aria-hidden="true"
+      >
+        <header class="admin-modal-header">
+          <h2 id="adminEditReportModalTitle">Edit Report Details</h2>
+          <button type="button" id="adminEditReportModalClose" class="admin-modal-close" aria-label="Close edit report modal">✕</button>
+        </header>
+        <form id="adminEditReportForm" class="admin-modal-body">
+          <input type="hidden" id="adminEditReportId" />
+          <div class="form-group">
+            <label for="adminEditLocation">Location</label>
+            <input id="adminEditLocation" type="text" required />
+          </div>
+          <div class="form-group">
+            <label for="adminEditSeverity">Severity</label>
+            <select id="adminEditSeverity" required>
+              <option value="Low">Low</option>
+              <option value="Medium">Medium</option>
+              <option value="High">High</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label for="adminEditDescription">Description</label>
+            <textarea id="adminEditDescription" rows="4"></textarea>
+          </div>
+          <div class="admin-modal-actions">
+            <button type="button" id="adminEditReportCancel" class="btn btn-outline">Cancel</button>
+            <button type="submit" id="adminEditReportSave" class="btn btn-primary">Save Changes</button>
+          </div>
+        </form>
+      </section>
+
+      <div id="adminConfirmModalBackdrop" class="admin-modal-backdrop hidden" aria-hidden="true"></div>
+      <section
+        id="adminConfirmModal"
+        class="admin-modal hidden"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="adminConfirmModalTitle"
+        aria-hidden="true"
+      >
+        <header class="admin-modal-header">
+          <h2 id="adminConfirmModalTitle">Confirm Action</h2>
+          <button type="button" id="adminConfirmModalClose" class="admin-modal-close" aria-label="Close confirmation modal">✕</button>
+        </header>
+        <div class="admin-modal-body">
+          <p id="adminConfirmModalMessage" class="muted">Are you sure?</p>
+          <label id="adminConfirmExtraWrap" class="admin-confirm-extra hidden">
+            <input type="checkbox" id="adminConfirmExtraCheckbox" />
+            <span id="adminConfirmExtraLabel">Also apply extra action</span>
+          </label>
+          <div class="admin-modal-actions">
+            <button type="button" id="adminConfirmCancel" class="btn btn-outline">Cancel</button>
+            <button type="button" id="adminConfirmOk" class="btn btn-primary">Continue</button>
+          </div>
+        </div>
+      </section>
     </main>
 
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>

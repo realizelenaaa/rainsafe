@@ -14,6 +14,7 @@ const STORAGE_KEY_ADMIN_TAB = "rainsafe.adminTab";
 const STORAGE_KEY_ADMIN_POST_LOGIN = "rainsafe.adminPostLogin";
 const VALID_USER_TABS = ["submit", "reports", "activity", "map"];
 const VALID_ADMIN_TABS = ["reports", "analytics", "activity", "map"];
+const VALID_ADMIN_REPORT_VIEWS = ["active", "false", "suspended"];
 
 let csrfToken = null;
 
@@ -1449,7 +1450,7 @@ function openAdminMapZoneSidebar(zoneName, zoneGeometry, options = {}) {
     subEl.textContent = sub;
   }
 
-  renderReports(listEl, filtered, { showReporter: true });
+  renderReports(listEl, filtered, { showReporter: true, showAdminActions: true });
 
   drawer.classList.remove("hidden");
   if (backdrop) {
@@ -1809,6 +1810,53 @@ async function apiCreateReport(reportBody) {
   });
 }
 
+async function apiMarkReportFalse(reportId, { note = "", suspendReporter = false } = {}) {
+  return apiRequest("reports.php?action=mark_false", {
+    method: "POST",
+    body: {
+      report_id: reportId,
+      note,
+      suspend_reporter: !!suspendReporter,
+    },
+  });
+}
+
+async function apiUnmarkReportFalse(reportId) {
+  return apiRequest("reports.php?action=unmark_false", {
+    method: "POST",
+    body: {
+      report_id: reportId,
+    },
+  });
+}
+
+async function apiUpdateReport(reportId, payload) {
+  return apiRequest("reports.php?action=update_report", {
+    method: "POST",
+    body: {
+      report_id: reportId,
+      location: payload.location,
+      severity: payload.severity,
+      description: payload.description || "",
+    },
+  });
+}
+
+async function apiSetUserSuspension(userId, suspend = true) {
+  return apiRequest("reports.php?action=suspend_user", {
+    method: "POST",
+    body: {
+      user_id: userId,
+      suspend: !!suspend,
+    },
+  });
+}
+
+async function apiGetSuspendedAccounts() {
+  const data = await apiRequest("reports.php?action=suspended_accounts", { method: "GET" });
+  return asArray(data && data.accounts);
+}
+
 async function apiGetUserActivityLogs() {
   const data = await apiRequest("activity_logs.php", { method: "GET" });
   return asArray(data && data.logs);
@@ -1845,12 +1893,31 @@ const adminDrawer = document.getElementById("adminDrawer");
 const adminDrawerToggle = document.getElementById("adminDrawerToggle");
 const adminDrawerBackdrop = document.getElementById("adminDrawerBackdrop");
 const adminDrawerClose = document.getElementById("adminDrawerClose");
+const adminEditReportModal = document.getElementById("adminEditReportModal");
+const adminEditReportModalBackdrop = document.getElementById("adminEditReportModalBackdrop");
+const adminEditReportModalClose = document.getElementById("adminEditReportModalClose");
+const adminEditReportCancel = document.getElementById("adminEditReportCancel");
+const adminEditReportForm = document.getElementById("adminEditReportForm");
+const adminEditReportIdInput = document.getElementById("adminEditReportId");
+const adminEditLocationInput = document.getElementById("adminEditLocation");
+const adminEditSeverityInput = document.getElementById("adminEditSeverity");
+const adminEditDescriptionInput = document.getElementById("adminEditDescription");
+const adminConfirmModal = document.getElementById("adminConfirmModal");
+const adminConfirmModalBackdrop = document.getElementById("adminConfirmModalBackdrop");
+const adminConfirmModalClose = document.getElementById("adminConfirmModalClose");
+const adminConfirmModalMessage = document.getElementById("adminConfirmModalMessage");
+const adminConfirmExtraWrap = document.getElementById("adminConfirmExtraWrap");
+const adminConfirmExtraCheckbox = document.getElementById("adminConfirmExtraCheckbox");
+const adminConfirmExtraLabel = document.getElementById("adminConfirmExtraLabel");
+const adminConfirmCancel = document.getElementById("adminConfirmCancel");
+const adminConfirmOk = document.getElementById("adminConfirmOk");
 
 // Always resolve these fresh from the DOM to avoid stale null refs
 function getAdminReportsList()     { return document.getElementById("adminReportsList"); }
 function getAdminSeverityFilter()  { return document.getElementById("adminSeverityFilter"); }
 function getHotspotsTableBody()    { return document.querySelector("#hotspotsTable tbody"); }
 function getAdminActivityLogsList(){ return document.getElementById("adminActivityLogsList"); }
+function getAdminReportsSubNav()   { return document.getElementById("adminReportsSubNav"); }
 
 const currentUserLabel = document.getElementById("currentUserLabel");
 const logoutBtn = document.getElementById("logoutBtn");
@@ -1861,6 +1928,7 @@ const locationInput = document.getElementById("location");
 
 let currentUser = null;
 let selectedSeverity = "Low";
+let adminReportsView = "active";
 
 function setStatus(element, message, type = "") {
   if (!element) return;
@@ -2098,7 +2166,11 @@ function escapeHtml(str) {
   });
 }
 
-function renderReports(listElement, reports, { showReporter = false } = {}) {
+function renderReports(
+  listElement,
+  reports,
+  { showReporter = false, showAdminActions = false } = {}
+) {
   if (!listElement) return;
 
   const rows = asArray(reports).filter((r) => r && typeof r === "object");
@@ -2119,6 +2191,7 @@ function renderReports(listElement, reports, { showReporter = false } = {}) {
         r.reporter_name && r.reporter_name.trim().length > 0
           ? r.reporter_name
           : "Anonymous";
+      const isFalse = Number(r.is_false_report) === 1;
 
       return `
       <article class="report-card">
@@ -2127,12 +2200,66 @@ function renderReports(listElement, reports, { showReporter = false } = {}) {
             <div class="report-location">${escapeHtml(r.location) || "Unknown location"}</div>
             <div class="report-tags">
               <span class="tag ${severityClass}">${r.severity} severity</span>
+              ${isFalse ? '<span class="tag tag-muted">False report</span>' : ""}
+              ${
+                showAdminActions && Number(r.reporter_is_suspended) === 1
+                  ? '<span class="tag tag-muted">Reporter suspended</span>'
+                  : ""
+              }
             </div>
           </div>
         </div>
         <div class="report-body">
           ${r.description ? escapeHtml(r.description) : "<em>No additional details provided.</em>"}
+          ${
+            isFalse && r.false_report_note
+              ? `<p><strong>Admin note:</strong> ${escapeHtml(r.false_report_note)}</p>`
+              : ""
+          }
         </div>
+        ${
+          showAdminActions
+            ? `<div class="report-card-actions-wrap">
+                <button
+                  type="button"
+                  class="report-actions-toggle"
+                  data-report-menu-toggle="true"
+                  aria-label="Open report actions"
+                  aria-expanded="false"
+                >&#8942;</button>
+                <div class="report-actions-menu hidden" data-report-menu>
+                  ${
+                    !isFalse
+                      ? `<button type="button" class="report-actions-item" data-report-action="mark-false" data-report-id="${Number(
+                          r.id
+                        )}" data-reporter-id="${Number(r.user_id)}">Mark as false report</button>`
+                      : ""
+                  }
+                  ${
+                    !isFalse
+                      ? `<button type="button" class="report-actions-item" data-report-action="edit-report" data-report-id="${Number(
+                          r.id
+                        )}">Edit details</button>`
+                      : ""
+                  }
+                  ${
+                    isFalse
+                      ? `<button type="button" class="report-actions-item" data-report-action="unmark-false" data-report-id="${Number(
+                          r.id
+                        )}">Unmark as false</button>`
+                      : ""
+                  }
+                  ${
+                    Number(r.reporter_is_suspended) !== 1
+                      ? `<button type="button" class="report-actions-item report-actions-item-danger" data-report-action="suspend-user" data-reporter-id="${Number(
+                          r.user_id
+                        )}">Suspend reporter</button>`
+                      : ""
+                  }
+                </div>
+              </div>`
+            : ""
+        }
         <div class="report-footer">
           <span>${formatDateTime(r.created_at)}</span>
           <span>${
@@ -2187,6 +2314,56 @@ function renderActivityLogs(listElement, logs, { showUser = false } = {}) {
       </article>
     `;
     })
+    .join("");
+}
+
+function renderSuspendedAccounts(listElement, accounts) {
+  if (!listElement) return;
+  const rows = asArray(accounts).filter((a) => a && typeof a === "object");
+  if (rows.length === 0) {
+    listElement.innerHTML = '<p class="muted">No suspended accounts.</p>';
+    listElement.classList.add("empty-state");
+    return;
+  }
+
+  listElement.classList.remove("empty-state");
+  listElement.innerHTML = rows
+    .map((a) => `
+      <article class="report-card">
+        <div class="report-card-actions-wrap">
+          <button
+            type="button"
+            class="report-actions-toggle"
+            data-report-menu-toggle="true"
+            aria-label="Open account actions"
+            aria-expanded="false"
+          >&#8942;</button>
+          <div class="report-actions-menu hidden" data-report-menu>
+            <button
+              type="button"
+              class="report-actions-item"
+              data-report-action="unsuspend-user"
+              data-reporter-id="${Number(a.id)}"
+            >
+              Unsuspend account
+            </button>
+          </div>
+        </div>
+        <div class="report-card-header">
+          <div>
+            <div class="report-location">${escapeHtml(a.email || a.reporter_name || `User #${a.id}`)}</div>
+            <div class="report-tags">
+              <span class="tag tag-muted">Suspended</span>
+              <span class="tag tag-muted">${escapeHtml(String(a.role || "user").toUpperCase())}</span>
+            </div>
+          </div>
+        </div>
+        <div class="report-body">
+          Account ID: ${Number(a.id)}<br>
+          Suspended at: ${formatDateTime(a.suspended_at) || "N/A"}
+        </div>
+      </article>
+    `)
     .join("");
 }
 
@@ -2610,6 +2787,9 @@ function updateUserMapMarkers(reports) {
   userMarkers = [];
 
   reports.forEach((report) => {
+    if (Number(report.is_false_report) === 1) {
+      return;
+    }
     if (report.latitude && report.longitude) {
       const marker = L.marker([report.latitude, report.longitude])
         .bindPopup(
@@ -2631,6 +2811,9 @@ function updateAdminMapMarkers(reports) {
   adminMarkers = [];
 
   reports.forEach((report) => {
+    if (Number(report.is_false_report) === 1) {
+      return;
+    }
     if (report.latitude && report.longitude) {
       const markerColor = getSeverityColor(report.severity);
       const marker = L.circleMarker([report.latitude, report.longitude], {
@@ -2763,13 +2946,46 @@ async function loadAdminReports() {
           (r) => r && String(r.severity) === sev
         )
       : cachedAdminReports;
-    renderReports(reportsList, filtered, { showReporter: true });
-    if (tableBody) renderHotspots(filtered);
-    if (adminReportsMap) updateAdminMapMarkers(filtered);
+    const activeReports = filtered.filter((r) => Number(r.is_false_report) !== 1);
+    const falseReports = filtered.filter((r) => Number(r.is_false_report) === 1);
+
+    if (adminReportsView === "false") {
+      renderReports(reportsList, falseReports, { showReporter: true, showAdminActions: true });
+    } else if (adminReportsView === "suspended") {
+      let suspendedAccounts = await apiGetSuspendedAccounts();
+      if (suspendedAccounts.length === 0) {
+        const byUser = new Map();
+        cachedAdminReports.forEach((r) => {
+          if (!r || Number(r.reporter_is_suspended) !== 1) {
+            return;
+          }
+          const uid = Number(r.user_id);
+          if (!Number.isFinite(uid) || uid <= 0) {
+            return;
+          }
+          if (!byUser.has(uid)) {
+            byUser.set(uid, {
+              id: uid,
+              email: "",
+              role: "user",
+              suspended_at: null,
+              reporter_name: r.reporter_name || "",
+            });
+          }
+        });
+        suspendedAccounts = Array.from(byUser.values());
+      }
+      renderSuspendedAccounts(reportsList, suspendedAccounts);
+    } else {
+      renderReports(reportsList, activeReports, { showReporter: true, showAdminActions: true });
+    }
+
+    if (tableBody) renderHotspots(activeReports);
+    if (adminReportsMap) updateAdminMapMarkers(activeReports);
   } catch (error) {
     console.error("Error loading admin reports:", error);
     cachedAdminReports = [];
-    renderReports(reportsList, [], { showReporter: true });
+    renderReports(reportsList, [], { showReporter: true, showAdminActions: true });
   }
 }
 
@@ -3030,6 +3246,302 @@ document.addEventListener("change", (event) => {
   }
 });
 
+document.addEventListener("click", (event) => {
+  const button = event.target && event.target.closest("[data-admin-reports-view]");
+  if (!button) {
+    return;
+  }
+  const view = String(button.getAttribute("data-admin-reports-view") || "");
+  if (!VALID_ADMIN_REPORT_VIEWS.includes(view)) {
+    return;
+  }
+  adminReportsView = view;
+  const nav = getAdminReportsSubNav();
+  if (nav) {
+    nav.querySelectorAll("[data-admin-reports-view]").forEach((el) => {
+      el.classList.toggle(
+        "side-tab-active",
+        el.getAttribute("data-admin-reports-view") === adminReportsView
+      );
+    });
+  }
+  if (currentUser && currentUser.role === "admin") {
+    loadAdminReports();
+  }
+});
+
+function closeAllReportMenus() {
+  document.querySelectorAll("[data-report-menu]").forEach((menu) => {
+    menu.classList.add("hidden");
+  });
+  document.querySelectorAll("[data-report-menu-toggle]").forEach((toggle) => {
+    toggle.setAttribute("aria-expanded", "false");
+  });
+  document.querySelectorAll(".report-card.report-card-menu-open").forEach((card) => {
+    card.classList.remove("report-card-menu-open");
+  });
+}
+
+function getCachedAdminReportById(reportId) {
+  const id = Number(reportId);
+  if (!Number.isFinite(id)) return null;
+  return cachedAdminReports.find((r) => r && Number(r.id) === id) || null;
+}
+
+function setAdminEditModalOpen(open) {
+  if (!adminEditReportModal || !adminEditReportModalBackdrop) {
+    return;
+  }
+  adminEditReportModal.classList.toggle("hidden", !open);
+  adminEditReportModalBackdrop.classList.toggle("hidden", !open);
+  adminEditReportModal.setAttribute("aria-hidden", open ? "false" : "true");
+  adminEditReportModalBackdrop.setAttribute("aria-hidden", open ? "false" : "true");
+}
+
+function openAdminEditReportModal(report) {
+  if (
+    !report ||
+    !adminEditReportIdInput ||
+    !adminEditLocationInput ||
+    !adminEditSeverityInput ||
+    !adminEditDescriptionInput
+  ) {
+    return;
+  }
+  adminEditReportIdInput.value = String(report.id || "");
+  adminEditLocationInput.value = String(report.location || "");
+  adminEditSeverityInput.value = String(report.severity || "Low");
+  adminEditDescriptionInput.value = String(report.description || "");
+  setAdminEditModalOpen(true);
+  setTimeout(() => adminEditLocationInput.focus(), 0);
+}
+
+function setAdminConfirmModalOpen(open) {
+  if (!adminConfirmModal || !adminConfirmModalBackdrop) {
+    return;
+  }
+  adminConfirmModal.classList.toggle("hidden", !open);
+  adminConfirmModalBackdrop.classList.toggle("hidden", !open);
+  adminConfirmModal.setAttribute("aria-hidden", open ? "false" : "true");
+  adminConfirmModalBackdrop.setAttribute("aria-hidden", open ? "false" : "true");
+}
+
+function confirmAdminAction(message, options = {}) {
+  return new Promise((resolve) => {
+    if (!adminConfirmModal || !adminConfirmModalMessage || !adminConfirmCancel || !adminConfirmOk) {
+      resolve({ confirmed: window.confirm(message), extraChecked: false });
+      return;
+    }
+
+    const showExtra = !!options.showExtraCheckbox;
+    adminConfirmModalMessage.textContent = message;
+    if (adminConfirmExtraWrap && adminConfirmExtraCheckbox && adminConfirmExtraLabel) {
+      adminConfirmExtraWrap.classList.toggle("hidden", !showExtra);
+      adminConfirmExtraLabel.textContent = options.extraLabel || "Also apply extra action";
+      adminConfirmExtraCheckbox.checked = false;
+    }
+
+    let settled = false;
+    const cleanup = () => {
+      adminConfirmCancel.removeEventListener("click", onCancel);
+      adminConfirmOk.removeEventListener("click", onOk);
+      if (adminConfirmModalClose) {
+        adminConfirmModalClose.removeEventListener("click", onCancel);
+      }
+      if (adminConfirmModalBackdrop) {
+        adminConfirmModalBackdrop.removeEventListener("click", onCancel);
+      }
+      setAdminConfirmModalOpen(false);
+    };
+    const finish = (confirmed) => {
+      if (settled) return;
+      settled = true;
+      const extraChecked =
+        !!(
+          showExtra &&
+          adminConfirmExtraCheckbox &&
+          adminConfirmExtraWrap &&
+          !adminConfirmExtraWrap.classList.contains("hidden") &&
+          adminConfirmExtraCheckbox.checked
+        );
+      cleanup();
+      resolve({ confirmed, extraChecked });
+    };
+    const onCancel = () => finish(false);
+    const onOk = () => finish(true);
+
+    adminConfirmCancel.addEventListener("click", onCancel);
+    adminConfirmOk.addEventListener("click", onOk);
+    if (adminConfirmModalClose) {
+      adminConfirmModalClose.addEventListener("click", onCancel);
+    }
+    if (adminConfirmModalBackdrop) {
+      adminConfirmModalBackdrop.addEventListener("click", onCancel);
+    }
+
+    setAdminConfirmModalOpen(true);
+  });
+}
+
+document.addEventListener("click", (event) => {
+  const toggle = event.target && event.target.closest("[data-report-menu-toggle]");
+  if (toggle) {
+    const wrap = toggle.closest(".report-card-actions-wrap");
+    const menu = wrap ? wrap.querySelector("[data-report-menu]") : null;
+    if (!menu) {
+      return;
+    }
+    const willOpen = menu.classList.contains("hidden");
+    closeAllReportMenus();
+    if (willOpen) {
+      menu.classList.remove("hidden");
+      toggle.setAttribute("aria-expanded", "true");
+      const card = toggle.closest(".report-card");
+      if (card) {
+        card.classList.add("report-card-menu-open");
+      }
+    }
+    return;
+  }
+
+  if (!event.target.closest(".report-card-actions-wrap")) {
+    closeAllReportMenus();
+  }
+});
+
+document.addEventListener("click", async (event) => {
+  const button = event.target && event.target.closest("[data-report-action]");
+  if (!button) {
+    return;
+  }
+  if (!currentUser || currentUser.role !== "admin") {
+    return;
+  }
+
+  const action = button.getAttribute("data-report-action");
+  const reportId = Number(button.getAttribute("data-report-id"));
+  const reporterId = Number(button.getAttribute("data-reporter-id"));
+
+  try {
+    await apiGetSession();
+    if (!csrfToken) {
+      alert("Session expired. Please refresh and login again.");
+      return;
+    }
+
+    button.disabled = true;
+    if (action === "mark-false") {
+      const result = await confirmAdminAction("Mark this report as false?", {
+        showExtraCheckbox: true,
+        extraLabel: "Also suspend this reporter account",
+      });
+      if (!result.confirmed) {
+        button.disabled = false;
+        return;
+      }
+      const suspendReporter = !!result.extraChecked;
+      await apiMarkReportFalse(reportId, { suspendReporter });
+      await loadAdminReports();
+      await loadAdminActivityLogs();
+      return;
+    }
+
+    if (action === "suspend-user") {
+      const result = await confirmAdminAction("Suspend this reporter account?");
+      if (!result.confirmed) {
+        button.disabled = false;
+        return;
+      }
+      await apiSetUserSuspension(reporterId, true);
+      await loadAdminReports();
+      await loadAdminActivityLogs();
+      return;
+    }
+
+    if (action === "unmark-false") {
+      const result = await confirmAdminAction("Restore this report to active reports?");
+      if (!result.confirmed) {
+        button.disabled = false;
+        return;
+      }
+      await apiUnmarkReportFalse(reportId);
+      await loadAdminReports();
+      await loadAdminActivityLogs();
+      return;
+    }
+
+    if (action === "edit-report") {
+      const row = getCachedAdminReportById(reportId);
+      if (!row) {
+        alert("Report not found in cache. Please refresh and try again.");
+        button.disabled = false;
+        return;
+      }
+      openAdminEditReportModal(row);
+      return;
+    }
+
+    if (action === "unsuspend-user") {
+      const result = await confirmAdminAction("Unsuspend this account?");
+      if (!result.confirmed) {
+        button.disabled = false;
+        return;
+      }
+      await apiSetUserSuspension(reporterId, false);
+      await loadAdminReports();
+      await loadAdminActivityLogs();
+      return;
+    }
+  } catch (error) {
+    console.error("Admin moderation action failed:", error);
+    alert(error.message || "Action failed.");
+  } finally {
+    button.disabled = false;
+  }
+});
+
+if (adminEditReportForm) {
+  adminEditReportForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    if (!currentUser || currentUser.role !== "admin") {
+      return;
+    }
+    const reportId = Number(adminEditReportIdInput && adminEditReportIdInput.value);
+    const location = String((adminEditLocationInput && adminEditLocationInput.value) || "").trim();
+    const severity = String((adminEditSeverityInput && adminEditSeverityInput.value) || "").trim();
+    const description = String((adminEditDescriptionInput && adminEditDescriptionInput.value) || "").trim();
+    if (!reportId || !location || !["Low", "Medium", "High"].includes(severity)) {
+      alert("Please fill required fields with valid values.");
+      return;
+    }
+    try {
+      await apiGetSession();
+      if (!csrfToken) {
+        alert("Session expired. Please refresh and login again.");
+        return;
+      }
+      await apiUpdateReport(reportId, { location, severity, description });
+      setAdminEditModalOpen(false);
+      await loadAdminReports();
+      await loadAdminActivityLogs();
+      closeAdminMapZoneSidebar();
+    } catch (error) {
+      console.error("Edit report failed:", error);
+      alert(error.message || "Unable to save report changes.");
+    }
+  });
+}
+
+if (adminEditReportModalClose) {
+  adminEditReportModalClose.addEventListener("click", () => setAdminEditModalOpen(false));
+}
+if (adminEditReportCancel) {
+  adminEditReportCancel.addEventListener("click", () => setAdminEditModalOpen(false));
+}
+if (adminEditReportModalBackdrop) {
+  adminEditReportModalBackdrop.addEventListener("click", () => setAdminEditModalOpen(false));
+}
+
 function setAdminDrawerOpen(open) {
   if (!adminDrawer) {
     return;
@@ -3066,6 +3578,18 @@ if (adminDrawerBackdrop) {
 }
 document.addEventListener("keydown", (event) => {
   if (event.key !== "Escape") {
+    return;
+  }
+  if (adminConfirmModal && !adminConfirmModal.classList.contains("hidden")) {
+    if (adminConfirmCancel) {
+      adminConfirmCancel.click();
+    } else {
+      setAdminConfirmModalOpen(false);
+    }
+    return;
+  }
+  if (adminEditReportModal && !adminEditReportModal.classList.contains("hidden")) {
+    setAdminEditModalOpen(false);
     return;
   }
   const zoneDrawer = document.getElementById("adminMapZoneDrawer");

@@ -56,3 +56,34 @@ function log_activity(int $userId, string $action, string $details = ''): bool
         return false;
     }
 }
+
+function db_column_exists(string $tableName, string $columnName): bool
+{
+    static $cache = [];
+    $key = strtolower($tableName . '.' . $columnName);
+    if (array_key_exists($key, $cache)) {
+        return $cache[$key];
+    }
+
+    try {
+        $pdo = get_pdo();
+        $stmt = $pdo->prepare(
+            'SELECT 1
+             FROM information_schema.COLUMNS
+             WHERE TABLE_SCHEMA = DATABASE()
+               AND TABLE_NAME = :table_name
+               AND COLUMN_NAME = :column_name
+             LIMIT 1'
+        );
+        $stmt->execute([
+            ':table_name' => $tableName,
+            ':column_name' => $columnName,
+        ]);
+        $cache[$key] = (bool) $stmt->fetchColumn();
+        return $cache[$key];
+    } catch (Throwable $e) {
+        error_log('db_column_exists failed: ' . $e->getMessage());
+        $cache[$key] = false;
+        return false;
+    }
+}
