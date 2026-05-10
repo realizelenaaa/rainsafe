@@ -61,7 +61,7 @@ let cachedUserReports = [];
 let cachedCampusZonePayload = null;
 
 /** Bump when zone logic changes so cached geometry is recomputed after refresh. */
-const RAINSAFE_MAP_BUILD = 20260226;
+const RAINSAFE_MAP_BUILD = 20260230;
 
 /** One tint for every campus subdivision (invisible divider look). Zone names unchanged for tooltips. */
 const CAMPUS_UNIFIED_ZONE_FILL = "#93c5fd";
@@ -112,6 +112,65 @@ function closeLatLngRing(ringLatLng) {
     ring.push([first[0], first[1]]);
   }
   return ring;
+}
+
+/** Extra margin around the campus parcel for pan limits (share of N–S / E–W span). */
+const CAMPUS_MAP_BOUNDS_PAD_RATIO = 0.14;
+
+function getPaddedCampusMapBounds() {
+  if (typeof L === "undefined") {
+    return null;
+  }
+  if (!Array.isArray(NBSC_PARCEL_LATLNG) || NBSC_PARCEL_LATLNG.length < 3) {
+    return null;
+  }
+  let padRatio = CAMPUS_MAP_BOUNDS_PAD_RATIO;
+  if (
+    typeof window !== "undefined" &&
+    typeof window.RAINSAFE_MAP_BOUNDS_PAD_RATIO === "number" &&
+    Number.isFinite(window.RAINSAFE_MAP_BOUNDS_PAD_RATIO) &&
+    window.RAINSAFE_MAP_BOUNDS_PAD_RATIO >= 0 &&
+    window.RAINSAFE_MAP_BOUNDS_PAD_RATIO < 0.45
+  ) {
+    padRatio = window.RAINSAFE_MAP_BOUNDS_PAD_RATIO;
+  }
+  const ring = closeLatLngRing(NBSC_PARCEL_LATLNG);
+  const b = L.latLngBounds(ring);
+  const sw = b.getSouthWest();
+  const ne = b.getNorthEast();
+  const latPad = (ne.lat - sw.lat) * padRatio;
+  const lngPad = (ne.lng - sw.lng) * padRatio;
+  return L.latLngBounds(
+    [sw.lat - latPad, sw.lng - lngPad],
+    [ne.lat + latPad, ne.lng + lngPad]
+  );
+}
+
+/**
+ * Keep the map pannable only near campus (with padding). Zoom-in unchanged;
+ * zoom-out clamped so the view cannot drift to unrelated map areas.
+ */
+function applyCampusMapPanLimits(map) {
+  if (!map || typeof map.setMaxBounds !== "function") {
+    return;
+  }
+  const bb = getPaddedCampusMapBounds();
+  if (!bb || typeof bb.isValid !== "function" || !bb.isValid()) {
+    return;
+  }
+  map.setMaxBounds(bb);
+  map.options.maxBounds = bb;
+  map.options.maxBoundsViscosity = 0.88;
+  if (typeof map.getBoundsZoom === "function" && typeof map.setMinZoom === "function") {
+    try {
+      const zFit = map.getBoundsZoom(bb);
+      if (typeof zFit === "number" && Number.isFinite(zFit)) {
+        map.setMinZoom(Math.max(0, zFit - 2));
+      }
+    } catch (e) {
+      /* ignore */
+    }
+  }
 }
 
 function getZoneExpandRatio() {
@@ -243,10 +302,131 @@ function gapAreaSqm(gapFeat) {
 }
 
 /**
+ * Voronoi / gap unions can produce a MultiPolygon: one main campus patch plus a
+ * far-away sliver. Leaflet draws both with the same zone name, so tooltips
+ * and hit targets appear in the wrong place. Keep the largest shell only.
+ */
+function sanitizeZoneGeometryKeepLargestPolygon(geometry) {
+  if (!geometry || typeof turf === "undefined") {
+    return geometry;
+  }
+  if (geometry.type === "Polygon") {
+    return geometry;
+  }
+  if (geometry.type !== "MultiPolygon" || !geometry.coordinates) {
+    return geometry;
+  }
+  let best = null;
+  let bestArea = -1;
+  for (let i = 0; i < geometry.coordinates.length; i++) {
+    const poly = { type: "Polygon", coordinates: geometry.coordinates[i] };
+    let a = 0;
+    try {
+      a = turf.area({ type: "Feature", geometry: poly });
+    } catch (e) {
+      a = 0;
+    }
+    if (a > bestArea) {
+      bestArea = a;
+      best = poly;
+    }
+  }
+  return best || geometry;
+}
+
+/** Template guide for one zone, clipped to parcel (authoritative footprint). */
+function zoneGuideMaskInParcel(def, parcelFeat) {
+  if (!def || !parcelFeat || typeof turf === "undefined") {
+    return null;
+  }
+  const adjustedRing = expandGuideRingLatLng(def.ring);
+  let raw = null;
+  try {
+    raw = latLngRingToPolygonFeature(
+      adjustedRing && adjustedRing.length >= 3 ? adjustedRing : def.ring
+    );
+  } catch (e) {
+    return null;
+  }
+  if (!raw) {
+    return null;
+  }
+  raw = rewindPolygonFeature(raw);
+  try {
+    return turf.intersect(raw, parcelFeat);
+  } catch (e) {
+    return null;
+  }
+}
+
+function getZoneGuideMaskMap(parcelFeat) {
+  const map = Object.create(null);
+  if (!parcelFeat || typeof turf === "undefined") {
+    return map;
+  }
+  NBSC_ZONE_DEFS.forEach((def) => {
+    const m = zoneGuideMaskInParcel(def, parcelFeat);
+    if (m && m.geometry) {
+      map[def.id] = m;
+    }
+  });
+  return map;
+}
+
+function gapPieceOverlapsGuideMask(gPiece, zoneId, maskMap) {
+  if (!gPiece || !gPiece.geometry || !maskMap) {
+    return true;
+  }
+  const mask = maskMap[zoneId];
+  if (!mask || !mask.geometry) {
+    return true;
+  }
+  try {
+    const o = turf.intersect(
+      { type: "Feature", geometry: gPiece.geometry },
+      mask
+    );
+    return o && o.geometry && gapAreaSqm(o) >= CAMPUS_GAP_MIN_SQM * 0.02;
+  } catch (e) {
+    return false;
+  }
+}
+
+/**
+ * Drop any geometry outside each zone’s template guide ∩ parcel (stops gap-fill
+ * from attaching corridor scraps to e.g. Area 8).
+ */
+function clipZoneGeometriesToGuideMasks(parcelFeat, zones) {
+  if (!parcelFeat || !zones || typeof turf === "undefined") {
+    return;
+  }
+  const maskMap = getZoneGuideMaskMap(parcelFeat);
+  zones.forEach((z) => {
+    if (!z || !z.geometry || z.id === "parcel-remainder") {
+      return;
+    }
+    const mask = maskMap[z.id];
+    if (!mask || !mask.geometry) {
+      return;
+    }
+    try {
+      const zf = { type: "Feature", geometry: z.geometry };
+      let inter = turf.intersect(zf, mask);
+      inter = inter ? rewindPolygonFeature(inter) : null;
+      if (inter && inter.geometry) {
+        z.geometry = inter.geometry;
+      }
+    } catch (e) {
+      /* keep */
+    }
+  });
+}
+
+/**
  * Merge one gap fragment into zones: try union in order of proximity (gap
  * representative point → zone), so thin “missing” strips attach to the right neighbor.
  */
-function mergeGapFragmentIntoZones(gPiece, zones) {
+function mergeGapFragmentIntoZones(gPiece, zones, parcelFeat) {
   if (
     typeof turf === "undefined" ||
     !gPiece ||
@@ -256,6 +436,10 @@ function mergeGapFragmentIntoZones(gPiece, zones) {
   ) {
     return false;
   }
+  const maskMap =
+    parcelFeat && typeof turf !== "undefined"
+      ? getZoneGuideMaskMap(parcelFeat)
+      : null;
   let refPt = null;
   try {
     refPt =
@@ -300,6 +484,12 @@ function mergeGapFragmentIntoZones(gPiece, zones) {
     const idx = ranked[r].idx;
     const z = zones[idx];
     if (!z.geometry) {
+      continue;
+    }
+    if (
+      maskMap &&
+      !gapPieceOverlapsGuideMask(gPiece, z.id, maskMap)
+    ) {
       continue;
     }
     try {
@@ -355,7 +545,7 @@ function absorbParcelGapsIntoZones(parcelFeat, zones) {
       if (gapAreaSqm(gPiece) < CAMPUS_GAP_MIN_SQM) {
         return;
       }
-      if (mergeGapFragmentIntoZones(gPiece, zones)) {
+      if (mergeGapFragmentIntoZones(gPiece, zones, parcelFeat)) {
         progressed = true;
       }
     });
@@ -371,8 +561,15 @@ function absorbParcelGapsIntoZones(parcelFeat, zones) {
     return;
   }
 
-  if (!mergeGapFragmentIntoZones({ type: "Feature", geometry: tail.geometry }, zones)) {
+  const tailFeat = { type: "Feature", geometry: tail.geometry };
+  const tailMaskMap = getZoneGuideMaskMap(parcelFeat);
+  if (!mergeGapFragmentIntoZones(tailFeat, zones, parcelFeat)) {
     for (let idx = 0; idx < zones.length; idx++) {
+      if (
+        !gapPieceOverlapsGuideMask(tailFeat, zones[idx].id, tailMaskMap)
+      ) {
+        continue;
+      }
       try {
         const zf = { type: "Feature", geometry: zones[idx].geometry };
         const merged = turf.union(zf, tail);
@@ -467,6 +664,7 @@ function voronoiAssignGapToZones(parcelFeat, zones) {
   }
 
   const gapFeat = { type: "Feature", geometry: gap.geometry };
+  const maskMap = getZoneGuideMaskMap(parcelFeat);
   let mergedAny = false;
   for (let i = 0; i < zones.length; i++) {
     const cell = vor.features[i];
@@ -478,6 +676,17 @@ function voronoiAssignGapToZones(parcelFeat, zones) {
       piece = turf.intersect(gapFeat, cell);
     } catch (e) {
       piece = null;
+    }
+    const mid = zones[i].id;
+    const gmask = maskMap[mid];
+    if (piece && piece.geometry && gmask && gmask.geometry) {
+      try {
+        const clipped = turf.intersect(piece, gmask);
+        piece =
+          clipped && clipped.geometry ? clipped : null;
+      } catch (e) {
+        piece = null;
+      }
     }
     if (!piece || !piece.geometry || gapAreaSqm(piece) < 1e-10) {
       continue;
@@ -661,7 +870,50 @@ function computeCampusZonePayload() {
     } catch (e) {
       /* ignore */
     }
-  } else if (
+  }
+
+  zones.forEach((z) => {
+    if (z && z.geometry) {
+      z.geometry = sanitizeZoneGeometryKeepLargestPolygon(z.geometry);
+    }
+  });
+  if (zones.length > 0) {
+    try {
+      fillParcelGapsAggressive(parcelFeat, zones);
+    } catch (e) {
+      /* ignore */
+    }
+  }
+
+  try {
+    clipZoneGeometriesToGuideMasks(parcelFeat, zones);
+  } catch (e) {
+    /* ignore */
+  }
+  zones.forEach((z) => {
+    if (z && z.geometry) {
+      z.geometry = sanitizeZoneGeometryKeepLargestPolygon(z.geometry);
+    }
+  });
+  if (zones.length > 0) {
+    try {
+      fillParcelGapsAggressive(parcelFeat, zones);
+    } catch (e) {
+      /* ignore */
+    }
+  }
+  try {
+    clipZoneGeometriesToGuideMasks(parcelFeat, zones);
+  } catch (e) {
+    /* ignore */
+  }
+  zones.forEach((z) => {
+    if (z && z.geometry) {
+      z.geometry = sanitizeZoneGeometryKeepLargestPolygon(z.geometry);
+    }
+  });
+
+  if (
     initialGapSqm >= CAMPUS_GAP_MIN_SQM &&
     zones.length === 0 &&
     gap &&
@@ -757,7 +1009,8 @@ function campusZoneDisplayNameAtLatLng(lat, lng) {
     return "NBSC Campus";
   }
   const pt = turf.point([lng, lat]);
-  for (let i = 0; i < zones.length; i++) {
+  /** Match Leaflet paint order: raiseDividedZoneStack puts later zones on top. */
+  for (let i = zones.length - 1; i >= 0; i--) {
     const z = zones[i];
     if (!z || !z.geometry) {
       continue;
@@ -883,6 +1136,8 @@ function addCampusParcelAndZones(
   } catch (e) {
     /* ignore */
   }
+
+  applyCampusMapPanLimits(map);
 
   const bundle = {
     map,
@@ -1046,6 +1301,18 @@ function setStatus(element, message, type = "") {
   if (type) {
     element.classList.add(type);
   }
+}
+
+/** Stored reporter identity for admin visibility — taken from the signed-in session (email). */
+function reporterNameFromSession() {
+  if (!currentUser) return "";
+  if (currentUser.name && String(currentUser.name).trim()) {
+    return String(currentUser.name).trim();
+  }
+  if (currentUser.email) {
+    return String(currentUser.email).trim();
+  }
+  return "";
 }
 
 function setLoading(button, isLoading, labelWhenIdle) {
@@ -1985,7 +2252,7 @@ if (reportForm) {
       location: String(fromMap || "").trim(),
       severity: selectedSeverity,
       description: document.getElementById("description").value.trim(),
-      reporter_name: document.getElementById("reporterName").value.trim(),
+      reporter_name: reporterNameFromSession(),
     };
 
     payload.latitude = mll.lat;
