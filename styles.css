@@ -694,3 +694,15 @@ textarea {
     flex-wrap: wrap;
   }
 }
+
+/* Campus zone name — shown only on hover (Leaflet tooltip) */
+.leaflet-tooltip.campus-zone-tooltip {
+  padding: 4px 9px;
+  border-radius: 6px;
+  border: 1px solid rgba(15, 23, 42, 0.14);
+  background: rgba(255, 255, 255, 0.95);
+  box-shadow: 0 3px 14px rgba(15, 23, 42, 0.14);
+  color: var(--text);
+  font-size: 0.78rem;
+  font-weight: 600;
+}

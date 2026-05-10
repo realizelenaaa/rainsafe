@@ -47,20 +47,853 @@ let userMarkers = [];
 let adminMarkers = [];
 let campusPolygon = null;
 
+/** Per-map campus overlay bundles (parcel outline + zone layers); keys userSubmit / userReports / admin. */
+const campusMapOverlays = {
+  userSubmit: null,
+  userReports: null,
+  admin: null,
+};
+
 /** Latest user reports for the map tab (markers applied when the map is created). */
 let cachedUserReports = [];
 
-// NBSC Campus Polygon Coordinates
-const campusPolygonCoords = [
-  [8.361547305316519, 124.86760525452044],
-  [8.361044161646763, 124.8696527571402],
-  [8.35882818764747, 124.86914203737508],
-  [8.359265105168815, 124.86701520908619],
-  [8.361547305316519, 124.86760525452044]
-];
+/** Cached GeoJSON geometries + parcel outline (lat/lng) after turf processing. */
+let cachedCampusZonePayload = null;
 
-// Center of NBSC Campus
-const campusCenter = [8.36006193862642, 124.86840879895996];
+/** Bump when zone logic changes so cached geometry is recomputed after refresh. */
+const RAINSAFE_MAP_BUILD = 20260226;
+
+/** One tint for every campus subdivision (invisible divider look). Zone names unchanged for tooltips. */
+const CAMPUS_UNIFIED_ZONE_FILL = "#93c5fd";
+
+/**
+ * Grow each zone slightly from centroid (guides only). Lower = less overlap before
+ * exclusive clip. Optional: window.RAINSAFE_ZONE_EXPAND_RATIO
+ */
+const CAMPUS_ZONE_EXPAND_RATIO = 0.06;
+
+/** Stop merging when unassigned parcel area is below this (m²). */
+const CAMPUS_GAP_MIN_SQM = 0.12;
+
+/** Max passes to absorb “missing” parcel into zones (union can need several rounds). */
+const CAMPUS_GAP_ABSORB_MAX_ITER = 18;
+
+/** Parcel + zone rings: edit `campus-map-template.js` (loaded before this file). */
+const NBSC_PARCEL_LATLNG =
+  typeof window !== "undefined" && window.RAINSAFE_CAMPUS_PARCEL_LATLNG
+    ? window.RAINSAFE_CAMPUS_PARCEL_LATLNG
+    : [];
+const NBSC_ZONE_DEFS =
+  typeof window !== "undefined" && window.RAINSAFE_CAMPUS_ZONE_DEFS
+    ? window.RAINSAFE_CAMPUS_ZONE_DEFS
+    : [];
+
+if (
+  typeof window !== "undefined" &&
+  (!Array.isArray(NBSC_PARCEL_LATLNG) ||
+    NBSC_PARCEL_LATLNG.length < 3 ||
+    !Array.isArray(NBSC_ZONE_DEFS) ||
+    NBSC_ZONE_DEFS.length === 0)
+) {
+  console.warn(
+    "RainSafe: load campus-map-template.js before app.js, or fill RAINSAFE_CAMPUS_PARCEL_LATLNG / RAINSAFE_CAMPUS_ZONE_DEFS."
+  );
+}
+
+// Center of NBSC Campus (updated when parcel GeoJSON is built)
+let campusCenter = [8.36006193862642, 124.86840879895996];
+
+function closeLatLngRing(ringLatLng) {
+  const ring = ringLatLng.map(([lat, lng]) => [lat, lng]);
+  if (ring.length === 0) return ring;
+  const first = ring[0];
+  const last = ring[ring.length - 1];
+  if (first[0] !== last[0] || first[1] !== last[1]) {
+    ring.push([first[0], first[1]]);
+  }
+  return ring;
+}
+
+function getZoneExpandRatio() {
+  if (
+    typeof window !== "undefined" &&
+    typeof window.RAINSAFE_ZONE_EXPAND_RATIO === "number" &&
+    Number.isFinite(window.RAINSAFE_ZONE_EXPAND_RATIO) &&
+    window.RAINSAFE_ZONE_EXPAND_RATIO >= 0 &&
+    window.RAINSAFE_ZONE_EXPAND_RATIO < 0.5
+  ) {
+    return window.RAINSAFE_ZONE_EXPAND_RATIO;
+  }
+  return CAMPUS_ZONE_EXPAND_RATIO;
+}
+
+/**
+ * Adjust the lat/lng you provided: each corner moves outward from the shape’s
+ * center so the area expands a little — then we clip to campus & split overlaps.
+ */
+function expandGuideRingLatLng(ringLatLng) {
+  const pts = [];
+  if (!Array.isArray(ringLatLng)) {
+    return null;
+  }
+  ringLatLng.forEach((p) => {
+    if (!Array.isArray(p) || p.length < 2) {
+      return;
+    }
+    const lat = Number(p[0]);
+    const lng = Number(p[1]);
+    if (Number.isFinite(lat) && Number.isFinite(lng)) {
+      pts.push([lat, lng]);
+    }
+  });
+  if (pts.length < 3) {
+    return null;
+  }
+  const r = getZoneExpandRatio();
+  let sumLat = 0;
+  let sumLng = 0;
+  pts.forEach(([la, ln]) => {
+    sumLat += la;
+    sumLng += ln;
+  });
+  const cLat = sumLat / pts.length;
+  const cLng = sumLng / pts.length;
+  return pts.map(([la, ln]) => {
+    const dLat = la - cLat;
+    const dLng = ln - cLng;
+    return [cLat + dLat * (1 + r), cLng + dLng * (1 + r)];
+  });
+}
+
+/** GeoJSON Polygon Feature from ring in Leaflet order [lat, lng]. */
+function latLngRingToPolygonFeature(ringLatLng) {
+  const closed = closeLatLngRing(ringLatLng);
+  const coords = closed.map(([lat, lng]) => [lng, lat]);
+  if (typeof turf === "undefined") {
+    return null;
+  }
+  return turf.polygon([coords]);
+}
+
+/** Normalize ring winding so Turf intersect/difference behave reliably. */
+function rewindPolygonFeature(feat) {
+  if (
+    !feat ||
+    typeof turf === "undefined" ||
+    typeof turf.rewind !== "function"
+  ) {
+    return feat;
+  }
+  try {
+    return turf.rewind(feat, { reverse: false });
+  } catch (e) {
+    return feat;
+  }
+}
+
+function zoneUnionFeatureCollection(zones) {
+  if (typeof turf === "undefined" || !zones || zones.length === 0) {
+    return null;
+  }
+  let u = null;
+  for (let i = 0; i < zones.length; i++) {
+    const z = zones[i];
+    if (!z || !z.geometry) {
+      continue;
+    }
+    const f = { type: "Feature", geometry: z.geometry };
+    try {
+      u = u ? turf.union(u, f) : f;
+    } catch (e) {
+      return null;
+    }
+  }
+  return u;
+}
+
+function parcelGapAfterZones(parcelFeat, zones) {
+  if (
+    typeof turf === "undefined" ||
+    !parcelFeat ||
+    !zones ||
+    zones.length === 0
+  ) {
+    return null;
+  }
+  const u = zoneUnionFeatureCollection(zones);
+  if (!u) {
+    return null;
+  }
+  try {
+    return turf.difference(parcelFeat, u);
+  } catch (e) {
+    return null;
+  }
+}
+
+function gapAreaSqm(gapFeat) {
+  if (!gapFeat || !gapFeat.geometry || typeof turf === "undefined") {
+    return 0;
+  }
+  try {
+    return turf.area(gapFeat);
+  } catch (e) {
+    return 0;
+  }
+}
+
+/**
+ * Merge one gap fragment into zones: try union in order of proximity (gap
+ * representative point → zone), so thin “missing” strips attach to the right neighbor.
+ */
+function mergeGapFragmentIntoZones(gPiece, zones) {
+  if (
+    typeof turf === "undefined" ||
+    !gPiece ||
+    !gPiece.geometry ||
+    !zones ||
+    zones.length === 0
+  ) {
+    return false;
+  }
+  let refPt = null;
+  try {
+    refPt =
+      typeof turf.centerOfMass === "function"
+        ? turf.centerOfMass(gPiece)
+        : turf.centroid(gPiece);
+  } catch (e) {
+    refPt = null;
+  }
+  if (!refPt || !refPt.geometry) {
+    return false;
+  }
+
+  const ranked = zones
+    .map((z, idx) => {
+      if (!z.geometry) {
+        return { idx, dkm: Infinity };
+      }
+      let zpt = null;
+      try {
+        zpt =
+          typeof turf.pointOnFeature === "function"
+            ? turf.pointOnFeature(z.geometry)
+            : turf.centroid(z.geometry);
+      } catch (e) {
+        zpt = null;
+      }
+      if (!zpt) {
+        return { idx, dkm: Infinity };
+      }
+      let dkm = Infinity;
+      try {
+        dkm = turf.distance(refPt, zpt, { units: "kilometers" });
+      } catch (e) {
+        dkm = Infinity;
+      }
+      return { idx, dkm };
+    })
+    .sort((a, b) => a.dkm - b.dkm);
+
+  for (let r = 0; r < ranked.length; r++) {
+    const idx = ranked[r].idx;
+    const z = zones[idx];
+    if (!z.geometry) {
+      continue;
+    }
+    try {
+      const zf = { type: "Feature", geometry: z.geometry };
+      const merged = turf.union(zf, gPiece);
+      if (merged && merged.geometry) {
+        zones[idx].geometry = merged.geometry;
+        return true;
+      }
+    } catch (e) {
+      /* try next zone */
+    }
+  }
+  return false;
+}
+
+/**
+ * Assign all unclaimed parcel interior into existing zones (no blank “missing”
+ * patches). Runs multiple passes because each union can unlock new adjacency.
+ */
+function absorbParcelGapsIntoZones(parcelFeat, zones) {
+  if (
+    typeof turf === "undefined" ||
+    !parcelFeat ||
+    !zones ||
+    zones.length === 0
+  ) {
+    return;
+  }
+
+  for (let iter = 0; iter < CAMPUS_GAP_ABSORB_MAX_ITER; iter++) {
+    const gap = parcelGapAfterZones(parcelFeat, zones);
+    const sq = gapAreaSqm(gap);
+    if (!gap || !gap.geometry || sq < CAMPUS_GAP_MIN_SQM) {
+      return;
+    }
+
+    let flat = null;
+    try {
+      flat = turf.flatten(gap);
+    } catch (e) {
+      flat = null;
+    }
+    if (!flat || !Array.isArray(flat.features) || flat.features.length === 0) {
+      return;
+    }
+
+    let progressed = false;
+    flat.features.forEach((gPiece) => {
+      if (!gPiece || !gPiece.geometry) {
+        return;
+      }
+      if (gapAreaSqm(gPiece) < CAMPUS_GAP_MIN_SQM) {
+        return;
+      }
+      if (mergeGapFragmentIntoZones(gPiece, zones)) {
+        progressed = true;
+      }
+    });
+
+    if (!progressed) {
+      break;
+    }
+  }
+
+  const tail = parcelGapAfterZones(parcelFeat, zones);
+  const tailSq = gapAreaSqm(tail);
+  if (!tail || !tail.geometry || tailSq < CAMPUS_GAP_MIN_SQM) {
+    return;
+  }
+
+  if (!mergeGapFragmentIntoZones({ type: "Feature", geometry: tail.geometry }, zones)) {
+    for (let idx = 0; idx < zones.length; idx++) {
+      try {
+        const zf = { type: "Feature", geometry: zones[idx].geometry };
+        const merged = turf.union(zf, tail);
+        if (merged && merged.geometry) {
+          zones[idx].geometry = merged.geometry;
+          break;
+        }
+      } catch (e) {
+        /* try next zone */
+      }
+    }
+  }
+}
+
+function inflateGeoBbox(bbox, ratio) {
+  if (!bbox || bbox.length < 4) {
+    return bbox;
+  }
+  const minX = bbox[0];
+  const minY = bbox[1];
+  const maxX = bbox[2];
+  const maxY = bbox[3];
+  const dx = (maxX - minX) * ratio;
+  const dy = (maxY - minY) * ratio;
+  return [minX - dx, minY - dy, maxX + dx, maxY + dy];
+}
+
+/**
+ * Split remaining parcel gap by Voronoi cells around each zone’s “seed”
+ * (center of mass), then union each slice into that zone — fills corridors
+ * your coordinates never enclosed.
+ */
+function voronoiAssignGapToZones(parcelFeat, zones) {
+  if (
+    typeof turf === "undefined" ||
+    typeof turf.voronoi !== "function" ||
+    !parcelFeat ||
+    !zones ||
+    zones.length === 0
+  ) {
+    return false;
+  }
+
+  let gap = parcelGapAfterZones(parcelFeat, zones);
+  if (gapAreaSqm(gap) < CAMPUS_GAP_MIN_SQM) {
+    return false;
+  }
+
+  const pts = [];
+  for (let i = 0; i < zones.length; i++) {
+    const z = zones[i];
+    if (!z.geometry) {
+      return false;
+    }
+    let p = null;
+    try {
+      const zf = { type: "Feature", geometry: z.geometry };
+      p =
+        typeof turf.centerOfMass === "function"
+          ? turf.centerOfMass(zf)
+          : turf.centroid(zf);
+    } catch (e) {
+      p = null;
+    }
+    if (!p || !p.geometry) {
+      return false;
+    }
+    pts.push(p);
+  }
+
+  let bbox;
+  try {
+    bbox = turf.bbox(parcelFeat);
+  } catch (e) {
+    return false;
+  }
+  const inflated = inflateGeoBbox(bbox, 0.04);
+
+  let vor = null;
+  try {
+    vor = turf.voronoi(turf.featureCollection(pts), { bbox: inflated });
+  } catch (e) {
+    return false;
+  }
+  if (!vor || !vor.features || vor.features.length < zones.length) {
+    return false;
+  }
+
+  gap = parcelGapAfterZones(parcelFeat, zones);
+  if (!gap || !gap.geometry || gapAreaSqm(gap) < CAMPUS_GAP_MIN_SQM) {
+    return false;
+  }
+
+  const gapFeat = { type: "Feature", geometry: gap.geometry };
+  let mergedAny = false;
+  for (let i = 0; i < zones.length; i++) {
+    const cell = vor.features[i];
+    if (!cell || !cell.geometry) {
+      continue;
+    }
+    let piece = null;
+    try {
+      piece = turf.intersect(gapFeat, cell);
+    } catch (e) {
+      piece = null;
+    }
+    if (!piece || !piece.geometry || gapAreaSqm(piece) < 1e-10) {
+      continue;
+    }
+    try {
+      const zf = { type: "Feature", geometry: zones[i].geometry };
+      const merged = turf.union(zf, piece);
+      if (merged && merged.geometry) {
+        zones[i].geometry = merged.geometry;
+        mergedAny = true;
+      }
+    } catch (e) {
+      /* skip */
+    }
+  }
+  return mergedAny;
+}
+
+function fillParcelGapsAggressive(parcelFeat, zones) {
+  if (
+    typeof turf === "undefined" ||
+    !parcelFeat ||
+    !zones ||
+    zones.length === 0
+  ) {
+    return;
+  }
+  absorbParcelGapsIntoZones(parcelFeat, zones);
+  const rounds = 4;
+  for (let r = 0; r < rounds; r++) {
+    const g = parcelGapAfterZones(parcelFeat, zones);
+    if (gapAreaSqm(g) < CAMPUS_GAP_MIN_SQM) {
+      return;
+    }
+    voronoiAssignGapToZones(parcelFeat, zones);
+    absorbParcelGapsIntoZones(parcelFeat, zones);
+  }
+}
+
+function registerCampusOverlay(mapKey, bundle) {
+  if (!mapKey || !bundle) {
+    return;
+  }
+  campusMapOverlays[mapKey] = bundle;
+}
+
+/**
+ * Stack divided zone paths so later template entries paint above earlier ones.
+ * Call before bringToFront on the parcel outline.
+ */
+function raiseDividedZoneStack(layerGroup) {
+  if (!layerGroup || typeof layerGroup.eachLayer !== "function") {
+    return;
+  }
+  layerGroup.eachLayer((layer) => {
+    if (typeof layer.bringToFront === "function") {
+      layer.bringToFront();
+    }
+  });
+}
+
+/** Map pane for campus zone polygons (below outline). */
+function setupCampusMapPanes(map) {
+  if (!map || typeof map.createPane !== "function") {
+    return;
+  }
+  if (!map.getPane("campusZones")) {
+    const pz = map.createPane("campusZones");
+    pz.style.zIndex = 410;
+  }
+}
+
+/**
+ * Clip zones to the parcel, trim overlaps (defined order), add gap-fill so the
+ * parcel interior is fully covered without overlapping zones.
+ */
+function computeCampusZonePayload() {
+  if (
+    !Array.isArray(NBSC_PARCEL_LATLNG) ||
+    NBSC_PARCEL_LATLNG.length < 3
+  ) {
+    return {
+      parcelLatLng: [],
+      zones: [],
+      zonesFallback: true,
+    };
+  }
+
+  if (typeof turf === "undefined") {
+    return {
+      parcelLatLng: closeLatLngRing(NBSC_PARCEL_LATLNG),
+      zones: [],
+      zonesFallback: true,
+    };
+  }
+
+  let parcelFeat = latLngRingToPolygonFeature(NBSC_PARCEL_LATLNG);
+  parcelFeat = rewindPolygonFeature(parcelFeat);
+  if (!parcelFeat) {
+    return {
+      parcelLatLng: closeLatLngRing(NBSC_PARCEL_LATLNG),
+      zones: [],
+      zonesFallback: true,
+    };
+  }
+
+  try {
+    const ctr = turf.center(parcelFeat);
+    if (ctr && ctr.geometry && ctr.geometry.coordinates) {
+      const [lng, lat] = ctr.geometry.coordinates;
+      campusCenter = [lat, lng];
+    }
+  } catch (e) {
+    /* keep default center */
+  }
+
+  let assignedUnion = null;
+  const zones = [];
+
+  NBSC_ZONE_DEFS.forEach((def) => {
+    const adjustedRing = expandGuideRingLatLng(def.ring);
+    let raw = null;
+    try {
+      raw = latLngRingToPolygonFeature(
+        adjustedRing && adjustedRing.length >= 3 ? adjustedRing : def.ring
+      );
+    } catch (e) {
+      raw = null;
+    }
+    if (!raw) return;
+
+    raw = rewindPolygonFeature(raw);
+
+    let clipped = null;
+    try {
+      clipped = turf.intersect(raw, parcelFeat);
+    } catch (e) {
+      clipped = null;
+    }
+    if (!clipped) return;
+
+    let piece = clipped;
+    if (assignedUnion) {
+      try {
+        piece = turf.difference(clipped, assignedUnion);
+      } catch (e) {
+        piece = null;
+      }
+      if (!piece) return;
+    }
+
+    try {
+      assignedUnion = assignedUnion
+        ? turf.union(assignedUnion, piece)
+        : piece;
+    } catch (e) {
+      return;
+    }
+
+    zones.push({
+      id: def.id,
+      name: def.name,
+      color: def.color,
+      geometry: piece.geometry,
+    });
+  });
+
+  let gap = null;
+  try {
+    gap = assignedUnion
+      ? turf.difference(parcelFeat, assignedUnion)
+      : parcelFeat;
+  } catch (e) {
+    gap = null;
+  }
+
+  const initialGapSqm = gapAreaSqm(gap);
+  if (initialGapSqm >= CAMPUS_GAP_MIN_SQM && zones.length > 0) {
+    try {
+      fillParcelGapsAggressive(parcelFeat, zones);
+    } catch (e) {
+      /* ignore */
+    }
+  } else if (
+    initialGapSqm >= CAMPUS_GAP_MIN_SQM &&
+    zones.length === 0 &&
+    gap &&
+    gap.geometry
+  ) {
+    zones.push({
+      id: "parcel-remainder",
+      name: "Campus parcel (no zone guides matched)",
+      color: "#94a3b8",
+      geometry: gap.geometry,
+    });
+  }
+
+  return {
+    parcelLatLng: closeLatLngRing(NBSC_PARCEL_LATLNG).map(([lat, lng]) => [
+      lat,
+      lng,
+    ]),
+    zones,
+    zonesFallback: zones.length === 0,
+  };
+}
+
+function getCampusZonePayload() {
+  if (
+    !cachedCampusZonePayload ||
+    cachedCampusZonePayload._build !== RAINSAFE_MAP_BUILD
+  ) {
+    cachedCampusZonePayload = computeCampusZonePayload();
+    cachedCampusZonePayload._build = RAINSAFE_MAP_BUILD;
+  }
+  return cachedCampusZonePayload;
+}
+
+let parcelPolyFeatHitTestCache = null;
+let parcelPolyFeatHitTestBuild = null;
+
+function getCampusParcelPolygonFeatureForHitTest() {
+  if (
+    parcelPolyFeatHitTestBuild === RAINSAFE_MAP_BUILD &&
+    parcelPolyFeatHitTestCache
+  ) {
+    return parcelPolyFeatHitTestCache;
+  }
+  if (
+    typeof turf === "undefined" ||
+    !Array.isArray(NBSC_PARCEL_LATLNG) ||
+    NBSC_PARCEL_LATLNG.length < 3
+  ) {
+    parcelPolyFeatHitTestCache = null;
+    parcelPolyFeatHitTestBuild = RAINSAFE_MAP_BUILD;
+    return null;
+  }
+  let f = latLngRingToPolygonFeature(closeLatLngRing(NBSC_PARCEL_LATLNG));
+  f = rewindPolygonFeature(f);
+  parcelPolyFeatHitTestCache = f;
+  parcelPolyFeatHitTestBuild = RAINSAFE_MAP_BUILD;
+  return f;
+}
+
+function isLatLngInsideCampusParcel(lat, lng) {
+  if (
+    typeof turf === "undefined" ||
+    !Number.isFinite(lat) ||
+    !Number.isFinite(lng)
+  ) {
+    return false;
+  }
+  const pf = getCampusParcelPolygonFeatureForHitTest();
+  if (!pf) {
+    return false;
+  }
+  try {
+    return turf.booleanPointInPolygon(turf.point([lng, lat]), pf);
+  } catch (e) {
+    return false;
+  }
+}
+
+/**
+ * Canonical display name for a report pin (which campus subdivision contains the point).
+ */
+function campusZoneDisplayNameAtLatLng(lat, lng) {
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+    return null;
+  }
+  if (!isLatLngInsideCampusParcel(lat, lng)) {
+    return null;
+  }
+  const payload = getCampusZonePayload();
+  const zones = payload && Array.isArray(payload.zones) ? payload.zones : [];
+  if (zones.length === 0 || typeof turf === "undefined") {
+    return "NBSC Campus";
+  }
+  const pt = turf.point([lng, lat]);
+  for (let i = 0; i < zones.length; i++) {
+    const z = zones[i];
+    if (!z || !z.geometry) {
+      continue;
+    }
+    try {
+      const zf = rewindPolygonFeature({ type: "Feature", geometry: z.geometry });
+      if (zf && turf.booleanPointInPolygon(pt, zf)) {
+        return String(z.name || "NBSC Campus").trim() || "NBSC Campus";
+      }
+    } catch (e) {
+      /* skip */
+    }
+  }
+  return "NBSC Campus";
+}
+
+/** Parcel outline + subdivided zones; zone names shown on hover only. */
+function addCampusParcelAndZones(
+  map,
+  { outlineWeight = 2, mapKey = "userSubmit" } = {}
+) {
+  const payload = getCampusZonePayload();
+
+  if (
+    !payload.parcelLatLng ||
+    payload.parcelLatLng.length < 3
+  ) {
+    return null;
+  }
+
+  setupCampusMapPanes(map);
+
+  const dividedGroup = L.layerGroup();
+
+  const onlyWholeParcelGap =
+    payload.zones.length === 1 &&
+    payload.zones[0].id === "parcel-remainder";
+
+  const turfOk =
+    typeof turf !== "undefined" &&
+    payload.zones.length > 0 &&
+    !onlyWholeParcelGap;
+
+  /** No visible borders between zones; single tint across all subdivisions */
+  const zonePolyStyleBase = {
+    weight: 0,
+    opacity: 0,
+    fillOpacity: 0.36,
+    fillColor: CAMPUS_UNIFIED_ZONE_FILL,
+    color: CAMPUS_UNIFIED_ZONE_FILL,
+  };
+
+  const bindZoneHoverName = (layer, displayName) => {
+    layer.bindTooltip(escapeHtml(displayName), {
+      sticky: true,
+      direction: "auto",
+      className: "campus-zone-tooltip",
+    });
+  };
+
+  if (turfOk) {
+    payload.zones.forEach((z) => {
+      if (!z.geometry) {
+        return;
+      }
+      const gj = {
+        type: "Feature",
+        properties: { name: z.name, color: z.color },
+        geometry: z.geometry,
+      };
+      L.geoJSON(gj, {
+        pane: "campusZones",
+        style: () => ({ ...zonePolyStyleBase }),
+        onEachFeature: (feat, layer) => {
+          bindZoneHoverName(layer, feat.properties.name);
+        },
+      }).addTo(dividedGroup);
+    });
+  } else if (NBSC_ZONE_DEFS.length > 0) {
+    console.warn(
+      "[RainSafe] Drawing campus zones as raw polygons (Turf missing or produced no zones). Overlap clipping disabled — hard-refresh (Ctrl+F5) if this persists."
+    );
+    NBSC_ZONE_DEFS.forEach((def) => {
+      const adjustedRing = expandGuideRingLatLng(def.ring);
+      const ring = closeLatLngRing(
+        adjustedRing && adjustedRing.length >= 3 ? adjustedRing : def.ring
+      );
+      const lyr = L.polygon(ring, {
+        pane: "campusZones",
+        ...zonePolyStyleBase,
+      });
+      bindZoneHoverName(lyr, def.name);
+      dividedGroup.addLayer(lyr);
+    });
+  }
+
+  try {
+    console.info(
+      "[RainSafe] campus map build %s · Turf: %s · zone layers: %s",
+      String(RAINSAFE_MAP_BUILD),
+      typeof turf !== "undefined" ? "yes" : "no",
+      turfOk ? String(payload.zones.length) : "raw"
+    );
+  } catch (e) {
+    /* ignore */
+  }
+
+  const outline = L.polygon(payload.parcelLatLng, {
+    color: "#0f172a",
+    weight: outlineWeight,
+    opacity: 1,
+    fillOpacity: 0,
+  });
+
+  dividedGroup.addTo(map);
+  raiseDividedZoneStack(dividedGroup);
+  outline.addTo(map);
+  outline.bringToFront();
+
+  try {
+    const bounds = L.latLngBounds(payload.parcelLatLng);
+    map.fitBounds(bounds, { padding: [28, 28], maxZoom: 18 });
+  } catch (e) {
+    /* ignore */
+  }
+
+  const bundle = {
+    map,
+    mapKey,
+    dividedGroup,
+    outline,
+  };
+  registerCampusOverlay(mapKey, bundle);
+  campusPolygon = outline;
+  return bundle;
+}
 
 // Chart objects
 let severityChart = null;
@@ -201,6 +1034,7 @@ const logoutBtn = document.getElementById("logoutBtn");
 
 const severityToggle = document.getElementById("severityToggle");
 const selectedLocationCoords = document.getElementById("selectedLocationCoords");
+const locationInput = document.getElementById("location");
 
 let currentUser = null;
 let selectedSeverity = "Low";
@@ -240,6 +1074,9 @@ function teardownLeafletMaps() {
     adminReportsMap = null;
   }
   campusPolygon = null;
+  campusMapOverlays.userSubmit = null;
+  campusMapOverlays.userReports = null;
+  campusMapOverlays.admin = null;
   currentMarker = null;
   userMarkers = [];
   adminMarkers = [];
@@ -671,28 +1508,23 @@ function fixMapTiles(map) {
   });
 }
 
-function addCampusOutlineToMap(map, style) {
-  const poly = L.polygon(campusPolygonCoords, style).addTo(map);
-  poly.bindPopup("Northern Bukidnon State College");
-  return poly;
-}
-
 /** Submit map (visible on default tab). */
 function initUserSubmitMap() {
   if (userSubmitMap || !document.getElementById("userSubmitMap")) return;
 
-  userSubmitMap = L.map("userSubmitMap", { scrollWheelZoom: true }).setView(
-    campusCenter,
-    18
-  );
+  getCampusZonePayload();
+
+  userSubmitMap = L.map("userSubmitMap", {
+    scrollWheelZoom: true,
+    preferCanvas: true,
+  }).setView(campusCenter, 18);
   addCampusTiles(userSubmitMap);
 
-  campusPolygon = addCampusOutlineToMap(userSubmitMap, {
-    color: "#2563eb",
-    weight: 3,
-    fillColor: "#3b82f6",
-    fillOpacity: 0.2,
+  const submitCampus = addCampusParcelAndZones(userSubmitMap, {
+    outlineWeight: 3,
+    mapKey: "userSubmit",
   });
+  campusPolygon = submitCampus ? submitCampus.outline : null;
 
   userSubmitMap.on("click", function (e) {
     placeMarker(e.latlng);
@@ -713,34 +1545,34 @@ function ensureUserReportsMap() {
   const el = document.getElementById("userReportsMap");
   if (!el) return;
 
-  userReportsMap = L.map("userReportsMap", { scrollWheelZoom: true }).setView(
-    campusCenter,
-    18
-  );
+  getCampusZonePayload();
+
+  userReportsMap = L.map("userReportsMap", {
+    scrollWheelZoom: true,
+    preferCanvas: true,
+  }).setView(campusCenter, 18);
   addCampusTiles(userReportsMap);
 
-  addCampusOutlineToMap(userReportsMap, {
-    color: "#2563eb",
-    weight: 2,
-    fillColor: "#3b82f6",
-    fillOpacity: 0.1,
+  addCampusParcelAndZones(userReportsMap, {
+    outlineWeight: 2,
+    mapKey: "userReports",
   });
 }
 
 function initAdminMap() {
   if (adminReportsMap || !document.getElementById("adminReportsMap")) return;
 
-  adminReportsMap = L.map("adminReportsMap", { scrollWheelZoom: true }).setView(
-    campusCenter,
-    18
-  );
+  getCampusZonePayload();
+
+  adminReportsMap = L.map("adminReportsMap", {
+    scrollWheelZoom: true,
+    preferCanvas: true,
+  }).setView(campusCenter, 18);
   addCampusTiles(adminReportsMap);
 
-  addCampusOutlineToMap(adminReportsMap, {
-    color: "#2563eb",
-    weight: 2,
-    fillColor: "#3b82f6",
-    fillOpacity: 0.1,
+  addCampusParcelAndZones(adminReportsMap, {
+    outlineWeight: 2,
+    mapKey: "admin",
   });
 
   fixMapTiles(adminReportsMap);
@@ -749,24 +1581,64 @@ function initAdminMap() {
 function placeMarker(latlng) {
   if (!userSubmitMap) return;
 
+  if (!isLatLngInsideCampusParcel(latlng.lat, latlng.lng)) {
+    setStatus(
+      reportMessage,
+      "Place your pin inside the NBSC campus outline only (click inside the bordered area).",
+      "error"
+    );
+    return;
+  }
+
+  const zoneDisplay = campusZoneDisplayNameAtLatLng(latlng.lat, latlng.lng);
+
+  setStatus(reportMessage, "");
+  if (locationInput && zoneDisplay) {
+    locationInput.value = zoneDisplay;
+  }
+
   if (currentMarker) {
     userSubmitMap.removeLayer(currentMarker);
   }
 
   currentMarker = L.marker(latlng, { draggable: true }).addTo(userSubmitMap);
 
+  let dragResume = L.latLng(latlng.lat, latlng.lng);
+  currentMarker.on("dragstart", function () {
+    dragResume = this.getLatLng();
+  });
+
+  currentMarker.on("dragend", function () {
+    const newPos = this.getLatLng();
+    if (!isLatLngInsideCampusParcel(newPos.lat, newPos.lng)) {
+      this.setLatLng(dragResume);
+      setStatus(
+        reportMessage,
+        "The pin must stay inside the campus boundary.",
+        "error"
+      );
+      return;
+    }
+    setStatus(reportMessage, "");
+    const zn = campusZoneDisplayNameAtLatLng(newPos.lat, newPos.lng);
+    if (locationInput && zn) {
+      locationInput.value = zn;
+    }
+    this.setPopupContent(
+      `<strong>${escapeHtml(zn)}</strong><br>
+      Lat: ${newPos.lat.toFixed(6)}<br>
+      Lng: ${newPos.lng.toFixed(6)}`
+    );
+    updateSelectedLocationDisplay(newPos.lat, newPos.lng);
+  });
+
   currentMarker
     .bindPopup(
-      `<strong>Selected Location</strong><br>
+      `<strong>${escapeHtml(zoneDisplay)}</strong><br>
       Lat: ${latlng.lat.toFixed(6)}<br>
       Lng: ${latlng.lng.toFixed(6)}`
     )
     .openPopup();
-
-  currentMarker.on("dragend", function (e) {
-    const newPos = e.target.getLatLng();
-    updateSelectedLocationDisplay(newPos.lat, newPos.lng);
-  });
 
   updateSelectedLocationDisplay(latlng.lat, latlng.lng);
 }
@@ -785,6 +1657,9 @@ function clearSelectedLocation() {
   if (selectedLocationCoords) {
     selectedLocationCoords.innerHTML = "";
   }
+  if (locationInput) {
+    locationInput.value = "";
+  }
 }
 
 function useMyLocation() {
@@ -801,6 +1676,14 @@ function useMyLocation() {
       );
       if (userSubmitMap) {
         userSubmitMap.setView(latlng, 18);
+        if (!isLatLngInsideCampusParcel(latlng.lat, latlng.lng)) {
+          setStatus(
+            reportMessage,
+            "Your GPS position is outside the campus parcel. Zoom to the outlined campus and tap inside it to drop your pin.",
+            "error"
+          );
+          return;
+        }
         placeMarker(latlng);
       }
     },
@@ -1077,20 +1960,43 @@ if (reportForm) {
 
     setStatus(reportMessage, "");
 
+    if (!currentMarker || !userSubmitMap) {
+      setStatus(
+        reportMessage,
+        "Tap inside the campus map to drop a pin — reports are tied to campus areas only.",
+        "error"
+      );
+      return;
+    }
+
+    const mll = currentMarker.getLatLng();
+    if (!isLatLngInsideCampusParcel(mll.lat, mll.lng)) {
+      setStatus(
+        reportMessage,
+        "Move your pin inside the campus outline before submitting.",
+        "error"
+      );
+      return;
+    }
+
+    const fromMap = campusZoneDisplayNameAtLatLng(mll.lat, mll.lng);
+
     const payload = {
-      location:      document.getElementById("location").value.trim(),
-      severity:      selectedSeverity,
-      description:   document.getElementById("description").value.trim(),
+      location: String(fromMap || "").trim(),
+      severity: selectedSeverity,
+      description: document.getElementById("description").value.trim(),
       reporter_name: document.getElementById("reporterName").value.trim(),
     };
 
-    if (currentMarker) {
-      payload.latitude  = currentMarker.getLatLng().lat;
-      payload.longitude = currentMarker.getLatLng().lng;
-    }
+    payload.latitude = mll.lat;
+    payload.longitude = mll.lng;
 
     if (!payload.location) {
-      setStatus(reportMessage, "Please enter a location name.", "error");
+      setStatus(
+        reportMessage,
+        "Could not resolve campus area name for your pin.",
+        "error"
+      );
       return;
     }
 

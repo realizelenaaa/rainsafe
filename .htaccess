@@ -1,0 +1,6 @@
+# Avoid stale JS/HTML during development (refresh picks up map template changes).
+<IfModule mod_headers.c>
+  <FilesMatch "\.(html|js)$">
+    Header set Cache-Control "no-store, no-cache, must-revalidate"
+  </FilesMatch>
+</IfModule>

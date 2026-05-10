@@ -136,12 +136,14 @@
 
             <form id="reportForm" class="form">
               <div class="form-group">
-                <label for="location">Location Name</label>
+                <label for="location">Location (from map)</label>
                 <input
                   type="text"
                   id="location"
-                  placeholder="e.g., Main Gate near Building A"
+                  placeholder="Drop a pin inside the campus — area name fills in automatically"
                   required
+                  autocomplete="off"
+                  readonly
                 />
               </div>
 
@@ -152,7 +154,7 @@
                   <button type="button" id="useMyLocationBtn" class="btn btn-outline">📍 Use My Location</button>
                   <button type="button" id="clearLocationBtn" class="btn btn-outline">🗑️ Clear Location</button>
                 </div>
-                <small class="muted">Click anywhere on the map to pin the exact location of the hazard</small>
+                <small class="muted">Only pins inside the bordered campus are allowed. The hazard area name is set from where you pin. Hover for internal zone names.</small>
                 <div id="selectedLocationCoords" class="muted" style="margin-top: 5px; font-size: 0.8rem;"></div>
               </div>
 
@@ -255,7 +257,7 @@
             <div class="view-header">
               <h2>All Reports Map</h2>
               <p class="muted">
-                View all reported hazard locations on campus.
+                View all reported hazard locations on campus. Hover the tinted campus overlay for subdivision names.
               </p>
             </div>
             <div id="userReportsMap" style="height: 500px; border-radius: 10px;"></div>
@@ -313,7 +315,7 @@
               <div class="view-header">
                 <h2>High-Risk Locations Map</h2>
                 <p class="muted">
-                  Locations with reported hazards. Click on markers for details.
+                  Locations with reported hazards. Click markers for details; hover the campus overlay for area names.
                 </p>
               </div>
               <div id="adminReportsMap" style="height: 500px; border-radius: 10px;"></div>
@@ -403,6 +405,9 @@
 
     <!-- Leaflet JS -->
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-    <script src="app.js"></script>
+    <!-- Turf.js (polygon clip / merge for campus zones) -->
+    <script src="https://cdn.jsdelivr.net/npm/@turf/turf@6.5.0/turf.min.js"></script>
+    <script src="campus-map-template.js?v=20260226"></script>
+    <script src="app.js?v=20260226"></script>
   </body>
 </html>
