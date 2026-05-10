@@ -10,8 +10,10 @@ const isAdminPage =
 
 const STORAGE_KEY_USER_TAB = "rainsafe.userTab";
 const STORAGE_KEY_ADMIN_TAB = "rainsafe.adminTab";
+/** One-shot: next admin.html load after redirect from index should open Reports, not restore Map. */
+const STORAGE_KEY_ADMIN_POST_LOGIN = "rainsafe.adminPostLogin";
 const VALID_USER_TABS = ["submit", "reports", "activity", "map"];
-const VALID_ADMIN_TABS = ["reports", "analytics", "activity"];
+const VALID_ADMIN_TABS = ["reports", "analytics", "activity", "map"];
 
 let csrfToken = null;
 
@@ -32,13 +34,14 @@ function readStoredAdminTab() {
   } catch (e) {
     /* ignore */
   }
-  return "reports";
+  return "analytics";
 }
 
 function clearDashboardTabStorage() {
   try {
     sessionStorage.removeItem(STORAGE_KEY_USER_TAB);
     sessionStorage.removeItem(STORAGE_KEY_ADMIN_TAB);
+    sessionStorage.removeItem(STORAGE_KEY_ADMIN_POST_LOGIN);
   } catch (e) {
     /* ignore */
   }
@@ -62,6 +65,9 @@ const campusMapOverlays = {
 
 /** Latest user reports for the map tab (markers applied when the map is created). */
 let cachedUserReports = [];
+
+/** Latest admin reports (zone sidebar filters from this cache). */
+let cachedAdminReports = [];
 
 /** Cached GeoJSON geometries + parcel outline (lat/lng) after turf processing. */
 let cachedCampusZonePayload = null;
@@ -1033,6 +1039,90 @@ function campusZoneDisplayNameAtLatLng(lat, lng) {
   return "NBSC Campus";
 }
 
+function filterReportsForAdminZone(reports, zoneName, zoneGeometry) {
+  const label = String(zoneName || "").trim();
+  const rows = asArray(reports).filter((r) => r && typeof r === "object");
+
+  return rows.filter((r) => {
+    const loc = (r.location || "").trim();
+    if (label && loc === label) {
+      return true;
+    }
+    if (
+      zoneGeometry &&
+      typeof turf !== "undefined" &&
+      r.latitude != null &&
+      r.longitude != null
+    ) {
+      try {
+        const pt = turf.point([Number(r.longitude), Number(r.latitude)]);
+        const zf = rewindPolygonFeature({
+          type: "Feature",
+          geometry: zoneGeometry,
+        });
+        if (zf && turf.booleanPointInPolygon(pt, zf)) {
+          return true;
+        }
+      } catch (e) {
+        /* skip */
+      }
+    }
+    return false;
+  });
+}
+
+function openAdminMapZoneSidebar(zoneName, zoneGeometry) {
+  const drawer = document.getElementById("adminMapZoneDrawer");
+  const backdrop = document.getElementById("adminMapZoneBackdrop");
+  const titleEl = document.getElementById("adminMapZoneTitle");
+  const subEl = document.getElementById("adminMapZoneSubtitle");
+  const listEl = document.getElementById("adminMapZoneReportList");
+  if (!drawer || !listEl) {
+    return;
+  }
+
+  const label = String(zoneName || "Area").trim() || "Area";
+  const filtered = filterReportsForAdminZone(
+    cachedAdminReports,
+    label,
+    zoneGeometry
+  );
+
+  if (titleEl) {
+    titleEl.textContent = label;
+  }
+  if (subEl) {
+    subEl.textContent =
+      filtered.length === 1
+        ? "1 report in this area."
+        : `${filtered.length} reports in this area.`;
+  }
+
+  renderReports(listEl, filtered, { showReporter: true });
+
+  drawer.classList.remove("hidden");
+  if (backdrop) {
+    backdrop.classList.remove("hidden");
+  }
+  drawer.setAttribute("aria-hidden", "false");
+  if (backdrop) {
+    backdrop.setAttribute("aria-hidden", "false");
+  }
+}
+
+function closeAdminMapZoneSidebar() {
+  const drawer = document.getElementById("adminMapZoneDrawer");
+  const backdrop = document.getElementById("adminMapZoneBackdrop");
+  if (drawer) {
+    drawer.classList.add("hidden");
+    drawer.setAttribute("aria-hidden", "true");
+  }
+  if (backdrop) {
+    backdrop.classList.add("hidden");
+    backdrop.setAttribute("aria-hidden", "true");
+  }
+}
+
 /** Parcel outline + subdivided zones; zone names shown on hover only. */
 function addCampusParcelAndZones(
   map,
@@ -1077,6 +1167,18 @@ function addCampusParcelAndZones(
     });
   };
 
+  const bindAdminZoneClickIfNeeded = (layer, zoneDisplayName, zoneGeometry) => {
+    if (mapKey !== "admin") {
+      return;
+    }
+    layer.on("click", (e) => {
+      if (typeof L !== "undefined" && L.DomEvent && e && e.originalEvent) {
+        L.DomEvent.stopPropagation(e);
+      }
+      openAdminMapZoneSidebar(zoneDisplayName, zoneGeometry);
+    });
+  };
+
   if (turfOk) {
     payload.zones.forEach((z) => {
       if (!z.geometry) {
@@ -1092,6 +1194,11 @@ function addCampusParcelAndZones(
         style: () => ({ ...zonePolyStyleBase }),
         onEachFeature: (feat, layer) => {
           bindZoneHoverName(layer, feat.properties.name);
+          bindAdminZoneClickIfNeeded(
+            layer,
+            feat.properties.name,
+            feat.geometry
+          );
         },
       }).addTo(dividedGroup);
     });
@@ -1109,6 +1216,21 @@ function addCampusParcelAndZones(
         ...zonePolyStyleBase,
       });
       bindZoneHoverName(lyr, def.name);
+      if (mapKey === "admin") {
+        lyr.on("click", (e) => {
+          if (typeof L !== "undefined" && L.DomEvent && e && e.originalEvent) {
+            L.DomEvent.stopPropagation(e);
+          }
+          let geometry = null;
+          try {
+            const gj = lyr.toGeoJSON();
+            geometry = gj && gj.geometry ? gj.geometry : null;
+          } catch (err) {
+            geometry = null;
+          }
+          openAdminMapZoneSidebar(def.name, geometry);
+        });
+      }
       dividedGroup.addLayer(lyr);
     });
   }
@@ -1129,6 +1251,7 @@ function addCampusParcelAndZones(
     weight: outlineWeight,
     opacity: 1,
     fillOpacity: 0,
+    interactive: false,
   });
 
   dividedGroup.addTo(map);
@@ -1415,7 +1538,6 @@ async function ensureAdminMapReady() {
     requestAnimationFrame(() => {
       requestAnimationFrame(() => {
         initAdminMap();
-        invalidateMapWhenReady(adminReportsMap);
         setTimeout(resolve, 50);
       });
     });
@@ -1474,12 +1596,21 @@ function setUserTab(tab) {
 }
 
 function setAdminTab(tab) {
+  if (tab !== "map") {
+    closeAdminMapZoneSidebar();
+  }
+
   const buttons = document.querySelectorAll("[data-admin-tab]");
   const panels = document.querySelectorAll("[data-admin-tab-panel]");
 
   buttons.forEach((btn) => {
     const value = btn.getAttribute("data-admin-tab");
-    btn.classList.toggle("top-tab-active", value === tab);
+    const active = value === tab;
+    if (btn.classList.contains("admin-nav-tab")) {
+      btn.classList.toggle("admin-nav-tab-active", active);
+    } else {
+      btn.classList.toggle("top-tab-active", active);
+    }
   });
 
   panels.forEach((panel) => {
@@ -1491,7 +1622,7 @@ function setAdminTab(tab) {
     if (currentUser && currentUser.role === "admin") {
       loadAnalytics();
     }
-  } else if (tab === "reports" && adminReportsMap) {
+  } else if (tab === "map" && adminReportsMap) {
     invalidateMapWhenReady(adminReportsMap);
   }
 
@@ -2069,6 +2200,11 @@ async function handleAuthChange(user) {
   }
 
   if (role === "admin" && !isAdminPage) {
+    try {
+      sessionStorage.setItem(STORAGE_KEY_ADMIN_POST_LOGIN, "1");
+    } catch (e) {
+      /* ignore */
+    }
     window.location.replace("admin.html");
     return;
   }
@@ -2080,9 +2216,18 @@ async function handleAuthChange(user) {
   try {
     if (role === "admin") {
       showView("admin");
-      setAdminTab(readStoredAdminTab());
+      let initialTab = readStoredAdminTab();
+      try {
+        if (sessionStorage.getItem(STORAGE_KEY_ADMIN_POST_LOGIN) === "1") {
+          sessionStorage.removeItem(STORAGE_KEY_ADMIN_POST_LOGIN);
+          initialTab = "analytics";
+        }
+      } catch (e) {
+        /* ignore */
+      }
+      setAdminTab(initialTab);
       await ensureAdminMapReady();
-      if (adminReportsMap) {
+      if (initialTab === "map" && adminReportsMap) {
         invalidateMapWhenReady(adminReportsMap);
         setTimeout(() => invalidateMapWhenReady(adminReportsMap), 350);
       }
@@ -2123,22 +2268,24 @@ async function loadAdminReports() {
 
   if (!reportsList) return;
 
-  const filters = {};
   const sev =
     severityFilter && typeof severityFilter.value === "string"
       ? severityFilter.value
       : "";
-  if (sev) {
-    filters.severity = sev;
-  }
-
   try {
-    const reports = await apiGetAdminReports(filters);
-    renderReports(reportsList, reports, { showReporter: true });
-    if (tableBody) renderHotspots(reports);
-    if (adminReportsMap) updateAdminMapMarkers(reports);
+    const allReports = await apiGetAdminReports({});
+    cachedAdminReports = asArray(allReports);
+    const filtered = sev
+      ? cachedAdminReports.filter(
+          (r) => r && String(r.severity) === sev
+        )
+      : cachedAdminReports;
+    renderReports(reportsList, filtered, { showReporter: true });
+    if (tableBody) renderHotspots(filtered);
+    if (adminReportsMap) updateAdminMapMarkers(filtered);
   } catch (error) {
     console.error("Error loading admin reports:", error);
+    cachedAdminReports = [];
     renderReports(reportsList, [], { showReporter: true });
   }
 }
@@ -2203,6 +2350,7 @@ if (adminTopNav) {
     const tab = button.getAttribute("data-admin-tab");
     if (!tab) return;
     setAdminTab(tab);
+    setAdminDrawerOpen(false);
   });
 }
 
@@ -2413,7 +2561,7 @@ function setAdminDrawerOpen(open) {
     adminDrawerToggle.setAttribute("aria-expanded", open ? "true" : "false");
     adminDrawerToggle.setAttribute(
       "aria-label",
-      open ? "Close admin menu" : "Open admin menu"
+      open ? "Close admin sidebar" : "Open admin sidebar"
     );
   }
   if (adminReportsMap) {
@@ -2434,14 +2582,31 @@ if (adminDrawerBackdrop) {
   adminDrawerBackdrop.addEventListener("click", () => setAdminDrawerOpen(false));
 }
 document.addEventListener("keydown", (event) => {
-  if (
-    event.key === "Escape" &&
-    adminDrawer &&
-    adminDrawer.classList.contains("is-open")
-  ) {
+  if (event.key !== "Escape") {
+    return;
+  }
+  const zoneDrawer = document.getElementById("adminMapZoneDrawer");
+  if (zoneDrawer && !zoneDrawer.classList.contains("hidden")) {
+    closeAdminMapZoneSidebar();
+    return;
+  }
+  if (adminDrawer && adminDrawer.classList.contains("is-open")) {
     setAdminDrawerOpen(false);
   }
 });
+
+const adminMapZoneBackdrop = document.getElementById("adminMapZoneBackdrop");
+const adminMapZoneClose = document.getElementById("adminMapZoneClose");
+if (adminMapZoneBackdrop) {
+  adminMapZoneBackdrop.addEventListener("click", () =>
+    closeAdminMapZoneSidebar()
+  );
+}
+if (adminMapZoneClose) {
+  adminMapZoneClose.addEventListener("click", () =>
+    closeAdminMapZoneSidebar()
+  );
+}
 
 document
   .getElementById("useMyLocationBtn")
