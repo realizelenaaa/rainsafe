@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>RainSafe Paths – Admin · NBSC</title>
+    <link rel="stylesheet" href="styles.css" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+  </head>
+  <body data-rainsafe-app="admin">
+    <!-- Fullscreen map + slide-out tools (burger, upper-left) -->
+    <section id="adminDashboardView" class="admin-dashboard-shell hidden">
+      <div class="admin-map-stage" aria-hidden="false">
+        <div id="adminReportsMap"></div>
+      </div>
+
+      <button
+        type="button"
+        id="adminDrawerToggle"
+        class="admin-burger-btn"
+        aria-label="Open admin menu"
+        aria-expanded="false"
+        aria-controls="adminDrawer"
+      >
+        <span class="admin-burger-line"></span>
+        <span class="admin-burger-line"></span>
+        <span class="admin-burger-line"></span>
+      </button>
+
+      <div
+        id="adminDrawerBackdrop"
+        class="admin-drawer-backdrop hidden"
+        aria-hidden="true"
+      ></div>
+
+      <aside
+        id="adminDrawer"
+        class="admin-drawer"
+        aria-label="Admin menu"
+        role="dialog"
+        aria-hidden="true"
+      >
+        <div class="admin-drawer-header">
+          <div>
+            <div class="admin-drawer-brand">☔ RainSafe · Admin</div>
+            <p class="admin-drawer-tag muted">
+              Reports, analytics, and logs — campus map stays fullscreen behind this panel.
+            </p>
+          </div>
+          <button
+            type="button"
+            id="adminDrawerClose"
+            class="btn btn-ghost admin-drawer-close"
+            aria-label="Close menu"
+          >
+            ✕
+          </button>
+        </div>
+
+        <nav class="top-tabs admin-drawer-tabs" id="adminTopNav">
+          <button class="top-tab top-tab-active" data-admin-tab="reports" type="button">
+            Reports
+          </button>
+          <button class="top-tab" data-admin-tab="analytics" type="button">
+            Analytics
+          </button>
+          <button class="top-tab" data-admin-tab="activity" type="button">
+            Activity Logs
+          </button>
+        </nav>
+
+        <div class="admin-panels admin-panels--drawer">
+          <div class="admin-panel-group" data-admin-tab-panel="reports">
+            <section class="panel panel-nested admin-drawer-panel">
+              <div class="view-header view-header-row">
+                <div>
+                  <h2>Reports Overview</h2>
+                  <p class="muted">
+                    Filter and review all submitted pathway reports across NBSC.
+                  </p>
+                </div>
+                <div class="filters">
+                  <select id="adminSeverityFilter">
+                    <option value="">All Severities</option>
+                    <option value="Low">Low</option>
+                    <option value="Medium">Medium</option>
+                    <option value="High">High</option>
+                  </select>
+                  <button id="adminRefreshBtn" class="btn btn-outline" type="button">
+                    Refresh
+                  </button>
+                </div>
+              </div>
+              <div id="adminReportsList" class="cards-list empty-state">
+                <p class="muted">
+                  No reports found. Ask students to submit pathway concerns.
+                </p>
+              </div>
+            </section>
+
+            <section class="panel panel-nested admin-drawer-panel">
+              <div class="view-header">
+                <h2>High-Risk Locations</h2>
+                <p class="muted">
+                  Locations with repeated reports or high severity. Use the fullscreen map to inspect pins.
+                </p>
+              </div>
+              <table class="table" id="hotspotsTable">
+                <thead>
+                  <tr>
+                    <th>Location</th>
+                    <th>Reports</th>
+                    <th>Most Recent Severity</th>
+                    <th>Last Reported</th>
+                  </tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+            </section>
+          </div>
+
+          <div class="admin-panel-group hidden" data-admin-tab-panel="analytics">
+            <section class="panel panel-nested admin-drawer-panel">
+              <div class="view-header">
+                <h2>Analytics Dashboard</h2>
+                <p class="muted">
+                  View statistics and trends for reported hazards.
+                </p>
+              </div>
+
+              <div class="stats-grid admin-stats-grid">
+                <div class="stat-card">
+                  <h3>Severity Distribution</h3>
+                  <canvas id="severityChart" width="400" height="400"></canvas>
+                </div>
+
+                <div class="stat-card">
+                  <h3>Monthly Trends</h3>
+                  <canvas id="monthlyTrendsChart" width="400" height="400"></canvas>
+                </div>
+
+                <div class="stat-card full-width">
+                  <h3>Top 10 Locations by Report Count</h3>
+                  <canvas id="topLocationsChart" width="800" height="400"></canvas>
+                </div>
+              </div>
+            </section>
+          </div>
+
+          <div class="admin-panel-group hidden" data-admin-tab-panel="activity">
+            <section class="panel panel-nested admin-drawer-panel">
+              <div class="view-header">
+                <h2>System Activity Logs</h2>
+                <p class="muted">
+                  View the most recent actions performed by users in the system.
+                </p>
+              </div>
+              <div id="adminActivityLogsList" class="cards-list empty-state">
+                <p class="muted">No activity logs found.</p>
+              </div>
+            </section>
+          </div>
+        </div>
+
+        <div class="admin-drawer-footer">
+          <span id="currentUserLabel" class="user-label admin-drawer-user hidden"></span>
+          <div class="admin-drawer-footer-actions">
+            <a href="index.html" class="btn btn-outline btn-sm">Reporter site</a>
+            <button id="logoutBtn" type="button" class="btn btn-ghost hidden">
+              Logout
+            </button>
+          </div>
+        </div>
+      </aside>
+    </section>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@turf/turf@6.5.0/turf.min.js"></script>
+    <script src="campus-map-template.js?v=20260302"></script>
+    <script src="app.js?v=20260302"></script>
+  </body>
+</html>

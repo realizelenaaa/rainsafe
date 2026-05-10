@@ -16,7 +16,7 @@
     <!-- Chart.js -->
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
   </head>
-  <body>
+  <body data-rainsafe-app="user">
     <header class="top-bar">
       <div class="logo">
         <span class="logo-mark">☔</span>
@@ -255,136 +255,6 @@
           </section>
         </div>
       </section>
-
-      <!-- ADMIN DASHBOARD -->
-      <section id="adminDashboardView" class="panel admin-dashboard hidden">
-        <nav class="top-tabs" id="adminTopNav">
-          <button class="top-tab top-tab-active" data-admin-tab="reports">
-            Reports
-          </button>
-          <button class="top-tab" data-admin-tab="analytics">
-            Analytics
-          </button>
-          <button class="top-tab" data-admin-tab="activity">
-            Activity Logs
-          </button>
-        </nav>
-
-        <div class="admin-panels">
-          <div
-            class="admin-panel-group"
-            data-admin-tab-panel="reports"
-          >
-            <section class="panel panel-nested">
-              <div class="view-header view-header-row">
-                <div>
-                  <h2>Reports Overview</h2>
-                  <p class="muted">
-                    Filter and review all submitted pathway reports across NBSC.
-                  </p>
-                </div>
-                <div class="filters">
-                  <select id="adminSeverityFilter">
-                    <option value="">All Severities</option>
-                    <option value="Low">Low</option>
-                    <option value="Medium">Medium</option>
-                    <option value="High">High</option>
-                  </select>
-                  <button id="adminRefreshBtn" class="btn btn-outline">
-                    Refresh
-                  </button>
-                </div>
-              </div>
-              <div id="adminReportsList" class="cards-list empty-state">
-                <p class="muted">
-                  No reports found. Ask students to submit pathway concerns.
-                </p>
-              </div>
-            </section>
-
-            <section class="panel panel-nested">
-              <div class="view-header">
-                <h2>High-Risk Locations Map</h2>
-                <p class="muted">
-                  Locations with reported hazards. Click markers for details; hover the campus overlay for area names.
-                </p>
-              </div>
-              <div id="adminReportsMap" style="height: 500px; border-radius: 10px;"></div>
-            </section>
-
-            <section class="panel panel-nested">
-              <div class="view-header">
-                <h2>High-Risk Locations</h2>
-                <p class="muted">
-                  Locations with repeated reports or high severity. Use this to
-                  coordinate maintenance and advisories.
-                </p>
-              </div>
-              <table class="table" id="hotspotsTable">
-                <thead>
-                  <tr>
-                    <th>Location</th>
-                    <th>Reports</th>
-                    <th>Most Recent Severity</th>
-                    <th>Last Reported</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <!-- Filled in by JS -->
-                </tbody>
-              </table>
-            </section>
-          </div>
-
-          <div
-            class="admin-panel-group hidden"
-            data-admin-tab-panel="analytics"
-          >
-            <section class="panel panel-nested">
-              <div class="view-header">
-                <h2>Analytics Dashboard</h2>
-                <p class="muted">
-                  View statistics and trends for reported hazards.
-                </p>
-              </div>
-              
-              <div class="stats-grid">
-                <div class="stat-card">
-                  <h3>Severity Distribution</h3>
-                  <canvas id="severityChart" width="400" height="400"></canvas>
-                </div>
-                
-                <div class="stat-card">
-                  <h3>Monthly Trends</h3>
-                  <canvas id="monthlyTrendsChart" width="400" height="400"></canvas>
-                </div>
-                
-                <div class="stat-card full-width">
-                  <h3>Top 10 Locations by Report Count</h3>
-                  <canvas id="topLocationsChart" width="800" height="400"></canvas>
-                </div>
-              </div>
-            </section>
-          </div>
-
-          <div
-            class="admin-panel-group hidden"
-            data-admin-tab-panel="activity"
-          >
-            <section class="panel panel-nested">
-              <div class="view-header">
-                <h2>System Activity Logs</h2>
-                <p class="muted">
-                  View the most recent actions performed by users in the system.
-                </p>
-              </div>
-              <div id="adminActivityLogsList" class="cards-list empty-state">
-                <p class="muted">No activity logs found.</p>
-              </div>
-            </section>
-          </div>
-        </div>
-      </section>
     </main>
 
     <footer class="footer">
@@ -398,7 +268,7 @@
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
     <!-- Turf.js (polygon clip / merge for campus zones) -->
     <script src="https://cdn.jsdelivr.net/npm/@turf/turf@6.5.0/turf.min.js"></script>
-    <script src="campus-map-template.js?v=20260227"></script>
-    <script src="app.js?v=20260230"></script>
+    <script src="campus-map-template.js?v=20260302"></script>
+    <script src="app.js?v=20260302"></script>
   </body>
 </html>

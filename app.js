@@ -2,6 +2,12 @@
 
 const API_BASE = "";
 
+/** Set on `<body data-rainsafe-app="admin">` for admin.html; reporters use index.html. */
+const isAdminPage =
+  typeof document !== "undefined" &&
+  document.body &&
+  document.body.getAttribute("data-rainsafe-app") === "admin";
+
 const STORAGE_KEY_USER_TAB = "rainsafe.userTab";
 const STORAGE_KEY_ADMIN_TAB = "rainsafe.adminTab";
 const VALID_USER_TABS = ["submit", "reports", "activity", "map"];
@@ -1277,6 +1283,10 @@ const userSideNav = document.getElementById("userSideNav");
 
 const adminRefreshBtn = document.getElementById("adminRefreshBtn");
 const adminTopNav = document.getElementById("adminTopNav");
+const adminDrawer = document.getElementById("adminDrawer");
+const adminDrawerToggle = document.getElementById("adminDrawerToggle");
+const adminDrawerBackdrop = document.getElementById("adminDrawerBackdrop");
+const adminDrawerClose = document.getElementById("adminDrawerClose");
 
 // Always resolve these fresh from the DOM to avoid stale null refs
 function getAdminReportsList()     { return document.getElementById("adminReportsList"); }
@@ -1350,25 +1360,33 @@ function teardownLeafletMaps() {
 }
 
 function showView(view) {
-  if (!loginView || !userDashboardView || !adminDashboardView) return;
-
-  loginView.classList.add("hidden");
-  userDashboardView.classList.add("hidden");
-  adminDashboardView.classList.add("hidden");
+  if (loginView) loginView.classList.add("hidden");
+  if (userDashboardView) userDashboardView.classList.add("hidden");
+  if (adminDashboardView) adminDashboardView.classList.add("hidden");
 
   if (view === "login") {
     teardownLeafletMaps();
-    loginView.classList.remove("hidden");
-    currentUserLabel.classList.add("hidden");
-    logoutBtn.classList.add("hidden");
-  } else if (view === "user") {
-    userDashboardView.classList.remove("hidden");
-    currentUserLabel.classList.remove("hidden");
-    logoutBtn.classList.remove("hidden");
-  } else if (view === "admin") {
-    adminDashboardView.classList.remove("hidden");
-    currentUserLabel.classList.remove("hidden");
-    logoutBtn.classList.remove("hidden");
+    if (loginView) loginView.classList.remove("hidden");
+    if (currentUserLabel) currentUserLabel.classList.add("hidden");
+    if (logoutBtn) logoutBtn.classList.add("hidden");
+    return;
+  }
+
+  if (view === "user") {
+    if (loginView) loginView.classList.add("hidden");
+    if (userDashboardView) userDashboardView.classList.remove("hidden");
+    if (adminDashboardView) adminDashboardView.classList.add("hidden");
+    if (currentUserLabel) currentUserLabel.classList.remove("hidden");
+    if (logoutBtn) logoutBtn.classList.remove("hidden");
+    return;
+  }
+
+  if (view === "admin") {
+    if (loginView) loginView.classList.add("hidden");
+    if (userDashboardView) userDashboardView.classList.add("hidden");
+    if (adminDashboardView) adminDashboardView.classList.remove("hidden");
+    if (currentUserLabel) currentUserLabel.classList.remove("hidden");
+    if (logoutBtn) logoutBtn.classList.remove("hidden");
   }
 }
 
@@ -1831,11 +1849,19 @@ function initAdminMap() {
 
   getCampusZonePayload();
 
-  adminReportsMap = L.map("adminReportsMap", {
+  const mapOpts = {
     scrollWheelZoom: true,
     preferCanvas: true,
-  }).setView(campusCenter, 18);
+  };
+  if (isAdminPage) {
+    mapOpts.zoomControl = false;
+  }
+
+  adminReportsMap = L.map("adminReportsMap", mapOpts).setView(campusCenter, 18);
   addCampusTiles(adminReportsMap);
+  if (isAdminPage && typeof L.control.zoom === "function") {
+    L.control.zoom({ position: "topright" }).addTo(adminReportsMap);
+  }
 
   addCampusParcelAndZones(adminReportsMap, {
     outlineWeight: 2,
@@ -2028,6 +2054,11 @@ async function handleAuthChange(user) {
   if (!user) {
     if (currentUserLabel) currentUserLabel.textContent = "";
     clearDashboardTabStorage();
+    if (isAdminPage) {
+      window.location.href = "index.html";
+      return;
+    }
+    teardownLeafletMaps();
     showView("login");
     return;
   }
@@ -2037,11 +2068,24 @@ async function handleAuthChange(user) {
     currentUserLabel.textContent = `${user.email} · ${role.toUpperCase()} MODE`;
   }
 
+  if (role === "admin" && !isAdminPage) {
+    window.location.replace("admin.html");
+    return;
+  }
+  if (role !== "admin" && isAdminPage) {
+    window.location.replace("index.html");
+    return;
+  }
+
   try {
     if (role === "admin") {
       showView("admin");
       setAdminTab(readStoredAdminTab());
       await ensureAdminMapReady();
+      if (adminReportsMap) {
+        invalidateMapWhenReady(adminReportsMap);
+        setTimeout(() => invalidateMapWhenReady(adminReportsMap), 350);
+      }
       await loadAdminReports();
       await loadAdminActivityLogs();
     } else {
@@ -2355,6 +2399,50 @@ document.addEventListener("change", (event) => {
   }
 });
 
+function setAdminDrawerOpen(open) {
+  if (!adminDrawer) {
+    return;
+  }
+  adminDrawer.classList.toggle("is-open", open);
+  adminDrawer.setAttribute("aria-hidden", open ? "false" : "true");
+  if (adminDrawerBackdrop) {
+    adminDrawerBackdrop.classList.toggle("hidden", !open);
+    adminDrawerBackdrop.setAttribute("aria-hidden", open ? "false" : "true");
+  }
+  if (adminDrawerToggle) {
+    adminDrawerToggle.setAttribute("aria-expanded", open ? "true" : "false");
+    adminDrawerToggle.setAttribute(
+      "aria-label",
+      open ? "Close admin menu" : "Open admin menu"
+    );
+  }
+  if (adminReportsMap) {
+    invalidateMapWhenReady(adminReportsMap);
+    setTimeout(() => invalidateMapWhenReady(adminReportsMap), 220);
+  }
+}
+
+if (adminDrawerToggle && adminDrawer) {
+  adminDrawerToggle.addEventListener("click", () => {
+    setAdminDrawerOpen(!adminDrawer.classList.contains("is-open"));
+  });
+}
+if (adminDrawerClose) {
+  adminDrawerClose.addEventListener("click", () => setAdminDrawerOpen(false));
+}
+if (adminDrawerBackdrop) {
+  adminDrawerBackdrop.addEventListener("click", () => setAdminDrawerOpen(false));
+}
+document.addEventListener("keydown", (event) => {
+  if (
+    event.key === "Escape" &&
+    adminDrawer &&
+    adminDrawer.classList.contains("is-open")
+  ) {
+    setAdminDrawerOpen(false);
+  }
+});
+
 document
   .getElementById("useMyLocationBtn")
   ?.addEventListener("click", useMyLocation);
@@ -2370,6 +2458,10 @@ document
     await handleAuthChange(user ?? null);
   } catch (err) {
     console.error("Error initializing session:", err);
-    showView("login");
+    if (isAdminPage) {
+      window.location.href = "index.html";
+    } else {
+      showView("login");
+    }
   }
 })();
