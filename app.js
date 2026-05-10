@@ -75,8 +75,15 @@ let cachedCampusZonePayload = null;
 /** Bump when zone logic changes so cached geometry is recomputed after refresh. */
 const RAINSAFE_MAP_BUILD = 20260230;
 
-/** One tint for every campus subdivision (invisible divider look). Zone names unchanged for tooltips. */
-const CAMPUS_UNIFIED_ZONE_FILL = "#93c5fd";
+/** Unified tint for the whole campus parcel (single overlay). Zone polygons sit on top with transparent fill. */
+const CAMPUS_PARCEL_HIGHLIGHT_FILL = "#93c5fd";
+
+/** Legacy alias — zone layers use transparent fill; color kept for Leaflet stroke props. */
+const CAMPUS_UNIFIED_ZONE_FILL = CAMPUS_PARCEL_HIGHLIGHT_FILL;
+
+/** Campus maps: zoom levels allowed after pan-limit calibration (see applyCampusMapPanLimits). */
+const CAMPUS_MAP_MIN_ZOOM = 15;
+const CAMPUS_MAP_MAX_ZOOM = 19;
 
 /**
  * Grow each zone slightly from centroid (guides only). Lower = less overlap before
@@ -126,6 +133,119 @@ function closeLatLngRing(ringLatLng) {
   return ring;
 }
 
+function distSqLatLng(latA, lngA, latB, lngB) {
+  const dLat = latA - latB;
+  const dLng = lngA - lngB;
+  return dLat * dLat + dLng * dLng;
+}
+
+function closestPointOnSegmentLatLng(lat, lng, lat1, lng1, lat2, lng2) {
+  const x = lng;
+  const y = lat;
+  const x1 = lng1;
+  const y1 = lat1;
+  const x2 = lng2;
+  const y2 = lat2;
+  const dx = x2 - x1;
+  const dy = y2 - y1;
+  if (dx === 0 && dy === 0) {
+    return { lat: y1, lng: x1 };
+  }
+  let t = ((x - x1) * dx + (y - y1) * dy) / (dx * dx + dy * dy);
+  t = Math.max(0, Math.min(1, t));
+  return {
+    lat: y1 + t * dy,
+    lng: x1 + t * dx,
+  };
+}
+
+function nearestPointOnClosedRingLatLng(lat, lng, ringLatLng) {
+  const ring = closeLatLngRing(ringLatLng);
+  if (!ring || ring.length < 2) {
+    return null;
+  }
+  let best = null;
+  let bestD = Infinity;
+  for (let i = 0; i < ring.length - 1; i++) {
+    const [la1, ln1] = ring[i];
+    const [la2, ln2] = ring[i + 1];
+    if (
+      !Number.isFinite(la1) ||
+      !Number.isFinite(ln1) ||
+      !Number.isFinite(la2) ||
+      !Number.isFinite(ln2)
+    ) {
+      continue;
+    }
+    const p = closestPointOnSegmentLatLng(lat, lng, la1, ln1, la2, ln2);
+    const d = distSqLatLng(lat, lng, p.lat, p.lng);
+    if (d < bestD) {
+      bestD = d;
+      best = p;
+    }
+  }
+  return best;
+}
+
+/** Closest point on the campus parcel ring (for off-parcel snaps). */
+function nearestBoundaryPointOnCampusParcel(lat, lng) {
+  if (
+    !Number.isFinite(lat) ||
+    !Number.isFinite(lng) ||
+    !Array.isArray(NBSC_PARCEL_LATLNG) ||
+    NBSC_PARCEL_LATLNG.length < 3
+  ) {
+    return null;
+  }
+  return nearestPointOnClosedRingLatLng(lat, lng, NBSC_PARCEL_LATLNG);
+}
+
+/** Named campus zone whose centroid is closest to the point (for hints outside the parcel). */
+function nearestCampusZoneLabelFromLatLng(lat, lng) {
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+    return { name: "NBSC Campus", distanceKm: null };
+  }
+  const payload = getCampusZonePayload();
+  const zones = payload && Array.isArray(payload.zones) ? payload.zones : [];
+  if (zones.length === 0 || typeof turf === "undefined") {
+    return { name: "NBSC Campus", distanceKm: null };
+  }
+  const pt = turf.point([lng, lat]);
+  let bestName = "NBSC Campus";
+  let bestDist = Infinity;
+  for (let i = 0; i < zones.length; i++) {
+    const z = zones[i];
+    if (!z || !z.geometry) {
+      continue;
+    }
+    try {
+      const fc = { type: "Feature", geometry: z.geometry };
+      const c = turf.center(fc);
+      if (!c || !c.geometry || !c.geometry.coordinates) {
+        continue;
+      }
+      const d = turf.distance(pt, c, { units: "kilometers" });
+      if (d < bestDist) {
+        bestDist = d;
+        bestName = String(z.name || "NBSC Campus").trim() || "NBSC Campus";
+      }
+    } catch (e) {
+      /* skip */
+    }
+  }
+  return {
+    name: bestName,
+    distanceKm: bestDist === Infinity ? null : bestDist,
+  };
+}
+
+function formatLatLngReadable(lat, lng) {
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+    return "";
+  }
+  return `${lat.toFixed(6)}, ${lng.toFixed(6)}`;
+}
+
 /** Extra margin around the campus parcel for pan limits (share of N–S / E–W span). */
 const CAMPUS_MAP_BOUNDS_PAD_RATIO = 0.14;
 
@@ -173,11 +293,18 @@ function applyCampusMapPanLimits(map) {
   map.setMaxBounds(bb);
   map.options.maxBounds = bb;
   map.options.maxBoundsViscosity = 0.88;
+  if (typeof map.setMaxZoom === "function") {
+    map.setMaxZoom(CAMPUS_MAP_MAX_ZOOM);
+  }
   if (typeof map.getBoundsZoom === "function" && typeof map.setMinZoom === "function") {
     try {
       const zFit = map.getBoundsZoom(bb);
       if (typeof zFit === "number" && Number.isFinite(zFit)) {
-        map.setMinZoom(Math.max(0, zFit - 2));
+        const minZ = Math.max(
+          CAMPUS_MAP_MIN_ZOOM,
+          Math.min(CAMPUS_MAP_MAX_ZOOM, zFit - 1)
+        );
+        map.setMinZoom(minZ);
       }
     } catch (e) {
       /* ignore */
@@ -1006,22 +1133,84 @@ function isLatLngInsideCampusParcel(lat, lng) {
 }
 
 /**
- * Canonical display name for a report pin (which campus subdivision contains the point).
+ * Exterior ring(s) of a GeoJSON Polygon / MultiPolygon as Leaflet-order rings [lat,lng].
  */
-function campusZoneDisplayNameAtLatLng(lat, lng) {
-  if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+function geoJsonExteriorRingsLatLng(geometry) {
+  const rings = [];
+  if (!geometry || typeof geometry !== "object") {
+    return rings;
+  }
+  if (geometry.type === "Polygon" && Array.isArray(geometry.coordinates)) {
+    const outer = geometry.coordinates[0];
+    if (Array.isArray(outer) && outer.length >= 2) {
+      rings.push(
+        outer.map((pair) => {
+          const lng = Number(pair[0]);
+          const lat = Number(pair[1]);
+          return [lat, lng];
+        })
+      );
+    }
+  } else if (
+    geometry.type === "MultiPolygon" &&
+    Array.isArray(geometry.coordinates)
+  ) {
+    geometry.coordinates.forEach((poly) => {
+      if (Array.isArray(poly) && poly[0] && poly[0].length >= 2) {
+        rings.push(
+          poly[0].map((pair) => {
+            const lng = Number(pair[0]);
+            const lat = Number(pair[1]);
+            return [lat, lng];
+          })
+        );
+      }
+    });
+  }
+  return rings;
+}
+
+/**
+ * Closest point on a zone polygon boundary (approx.) for gap / proximity assignment.
+ */
+function nearestPointOnPolygonGeometryLatLng(lat, lng, geometry) {
+  let best = null;
+  let bestD = Infinity;
+  const rings = geoJsonExteriorRingsLatLng(geometry);
+  for (let r = 0; r < rings.length; r++) {
+    const p = nearestPointOnClosedRingLatLng(lat, lng, rings[r]);
+    if (!p) {
+      continue;
+    }
+    const d = distSqLatLng(lat, lng, p.lat, p.lng);
+    if (d < bestD) {
+      bestD = d;
+      best = p;
+    }
+  }
+  return best;
+}
+
+/** GeoJSON Polygon geometry from a campus-map-template zone def (for raw / fallback maps). */
+function zoneGeometryFromCampusDef(def) {
+  if (!def || !Array.isArray(def.ring) || def.ring.length < 3) {
     return null;
   }
-  if (!isLatLngInsideCampusParcel(lat, lng)) {
+  const adjustedRing = expandGuideRingLatLng(def.ring);
+  const ring = closeLatLngRing(
+    adjustedRing && adjustedRing.length >= 3 ? adjustedRing : def.ring
+  );
+  const feat = latLngRingToPolygonFeature(ring);
+  return feat && feat.geometry ? feat.geometry : null;
+}
+
+function findContainingCampusZoneAtLatLng(lat, lng) {
+  if (typeof turf === "undefined") {
     return null;
-  }
-  const payload = getCampusZonePayload();
-  const zones = payload && Array.isArray(payload.zones) ? payload.zones : [];
-  if (zones.length === 0 || typeof turf === "undefined") {
-    return "NBSC Campus";
   }
   const pt = turf.point([lng, lat]);
-  /** Match Leaflet paint order: raiseDividedZoneStack puts later zones on top. */
+  const payload = getCampusZonePayload();
+  const zones = payload && Array.isArray(payload.zones) ? payload.zones : [];
   for (let i = zones.length - 1; i >= 0; i--) {
     const z = zones[i];
     if (!z || !z.geometry) {
@@ -1030,13 +1219,143 @@ function campusZoneDisplayNameAtLatLng(lat, lng) {
     try {
       const zf = rewindPolygonFeature({ type: "Feature", geometry: z.geometry });
       if (zf && turf.booleanPointInPolygon(pt, zf)) {
-        return String(z.name || "NBSC Campus").trim() || "NBSC Campus";
+        return {
+          name: String(z.name || "NBSC Campus").trim() || "NBSC Campus",
+          geometry: z.geometry,
+        };
       }
     } catch (e) {
       /* skip */
     }
   }
-  return "NBSC Campus";
+  for (let d = 0; d < NBSC_ZONE_DEFS.length; d++) {
+    const def = NBSC_ZONE_DEFS[d];
+    const geom = zoneGeometryFromCampusDef(def);
+    if (!geom) {
+      continue;
+    }
+    try {
+      const zf = rewindPolygonFeature({ type: "Feature", geometry: geom });
+      if (zf && turf.booleanPointInPolygon(pt, zf)) {
+        return {
+          name: String(def.name || "NBSC Campus").trim() || "NBSC Campus",
+          geometry: geom,
+        };
+      }
+    } catch (e) {
+      /* skip */
+    }
+  }
+  return null;
+}
+
+function findNearestCampusZoneByBoundaryProximity(lat, lng) {
+  if (typeof turf === "undefined") {
+    return null;
+  }
+  const clickPt = turf.point([lng, lat]);
+  const payload = getCampusZonePayload();
+  const zones = payload && Array.isArray(payload.zones) ? payload.zones : [];
+  const candidates = [];
+  if (zones.length > 0) {
+    for (let i = 0; i < zones.length; i++) {
+      const z = zones[i];
+      if (z && z.geometry) {
+        candidates.push({
+          name: String(z.name || "NBSC Campus").trim() || "NBSC Campus",
+          geometry: z.geometry,
+        });
+      }
+    }
+  } else {
+    for (let d = 0; d < NBSC_ZONE_DEFS.length; d++) {
+      const def = NBSC_ZONE_DEFS[d];
+      const geom = zoneGeometryFromCampusDef(def);
+      if (geom) {
+        candidates.push({
+          name: String(def.name || "NBSC Campus").trim() || "NBSC Campus",
+          geometry: geom,
+        });
+      }
+    }
+  }
+  if (candidates.length === 0) {
+    return null;
+  }
+  let best = null;
+  let bestKm = Infinity;
+  for (let i = 0; i < candidates.length; i++) {
+    const c = candidates[i];
+    const p = nearestPointOnPolygonGeometryLatLng(lat, lng, c.geometry);
+    if (!p) {
+      continue;
+    }
+    let km = Infinity;
+    try {
+      km = turf.distance(clickPt, turf.point([p.lng, p.lat]), {
+        units: "kilometers",
+      });
+    } catch (e) {
+      km =
+        Math.sqrt(distSqLatLng(lat, lng, p.lat, p.lng)) * 111.32;
+    }
+    if (km < bestKm) {
+      bestKm = km;
+      best = {
+        name: c.name,
+        geometry: c.geometry,
+        distanceKm: km,
+        nearestEdgeLatLng: p,
+      };
+    }
+  }
+  return best;
+}
+
+/**
+ * Zone for a parcel point: containing polygon, or nearest zone by boundary distance if in a gap.
+ */
+function resolveCampusZoneForPointInParcel(lat, lng) {
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+    return null;
+  }
+  if (!isLatLngInsideCampusParcel(lat, lng)) {
+    return null;
+  }
+  const payload = getCampusZonePayload();
+  const zones = payload && Array.isArray(payload.zones) ? payload.zones : [];
+  if (zones.length === 0 && NBSC_ZONE_DEFS.length === 0) {
+    return { name: "NBSC Campus", geometry: null, viaProximity: false };
+  }
+  const inside = findContainingCampusZoneAtLatLng(lat, lng);
+  if (inside) {
+    return { ...inside, viaProximity: false };
+  }
+  const nearest = findNearestCampusZoneByBoundaryProximity(lat, lng);
+  if (!nearest) {
+    return { name: "NBSC Campus", geometry: null, viaProximity: true };
+  }
+  return {
+    name: nearest.name,
+    geometry: nearest.geometry,
+    viaProximity: true,
+    proximityKm: nearest.distanceKm,
+    nearestEdgeLatLng: nearest.nearestEdgeLatLng,
+  };
+}
+
+/**
+ * Canonical display name for a report pin (which campus subdivision contains the point).
+ */
+function campusZoneDisplayNameAtLatLng(lat, lng) {
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+    return null;
+  }
+  const resolved = resolveCampusZoneForPointInParcel(lat, lng);
+  if (!resolved) {
+    return null;
+  }
+  return resolved.name;
 }
 
 function filterReportsForAdminZone(reports, zoneName, zoneGeometry) {
@@ -1047,6 +1366,20 @@ function filterReportsForAdminZone(reports, zoneName, zoneGeometry) {
     const loc = (r.location || "").trim();
     if (label && loc === label) {
       return true;
+    }
+    if (r.latitude != null && r.longitude != null) {
+      const lat = Number(r.latitude);
+      const lng = Number(r.longitude);
+      if (
+        Number.isFinite(lat) &&
+        Number.isFinite(lng) &&
+        isLatLngInsideCampusParcel(lat, lng)
+      ) {
+        const resolved = resolveCampusZoneForPointInParcel(lat, lng);
+        if (resolved && label && resolved.name === label) {
+          return true;
+        }
+      }
     }
     if (
       zoneGeometry &&
@@ -1071,7 +1404,14 @@ function filterReportsForAdminZone(reports, zoneName, zoneGeometry) {
   });
 }
 
-function openAdminMapZoneSidebar(zoneName, zoneGeometry) {
+function openAdminMapZoneSidebar(zoneName, zoneGeometry, options = {}) {
+  if (
+    !isAdminPage ||
+    !currentUser ||
+    currentUser.role !== "admin"
+  ) {
+    return;
+  }
   const drawer = document.getElementById("adminMapZoneDrawer");
   const backdrop = document.getElementById("adminMapZoneBackdrop");
   const titleEl = document.getElementById("adminMapZoneTitle");
@@ -1092,10 +1432,21 @@ function openAdminMapZoneSidebar(zoneName, zoneGeometry) {
     titleEl.textContent = label;
   }
   if (subEl) {
-    subEl.textContent =
+    let sub =
       filtered.length === 1
         ? "1 report in this area."
         : `${filtered.length} reports in this area.`;
+    if (options && options.viaProximity) {
+      sub +=
+        " This point lies in an un-zoned sliver of the parcel; it is grouped with the nearest zone (by edge distance).";
+      if (
+        options.proximityKm != null &&
+        Number.isFinite(options.proximityKm)
+      ) {
+        sub += ` (~${(options.proximityKm * 1000).toFixed(0)} m to that zone’s boundary).`;
+      }
+    }
+    subEl.textContent = sub;
   }
 
   renderReports(listEl, filtered, { showReporter: true });
@@ -1111,6 +1462,9 @@ function openAdminMapZoneSidebar(zoneName, zoneGeometry) {
 }
 
 function closeAdminMapZoneSidebar() {
+  if (!isAdminPage) {
+    return;
+  }
   const drawer = document.getElementById("adminMapZoneDrawer");
   const backdrop = document.getElementById("adminMapZoneBackdrop");
   if (drawer) {
@@ -1120,6 +1474,72 @@ function closeAdminMapZoneSidebar() {
   if (backdrop) {
     backdrop.classList.add("hidden");
     backdrop.setAttribute("aria-hidden", "true");
+  }
+}
+
+function openAdminOffParcelSidebar(clickLatLng, nearestBoundary, nearestZone) {
+  if (
+    !isAdminPage ||
+    !currentUser ||
+    currentUser.role !== "admin"
+  ) {
+    return;
+  }
+  const drawer = document.getElementById("adminMapZoneDrawer");
+  const backdrop = document.getElementById("adminMapZoneBackdrop");
+  const titleEl = document.getElementById("adminMapZoneTitle");
+  const subEl = document.getElementById("adminMapZoneSubtitle");
+  const listEl = document.getElementById("adminMapZoneReportList");
+  if (!drawer || !listEl || !clickLatLng) {
+    return;
+  }
+
+  if (titleEl) {
+    titleEl.textContent = "Outside campus parcel";
+  }
+  if (subEl) {
+    subEl.textContent =
+      "This location is outside the NBSC parcel. Reference coordinates are calculated below.";
+  }
+
+  const lines = [];
+  lines.push(
+    `Clicked: ${formatLatLngReadable(clickLatLng.lat, clickLatLng.lng)}`
+  );
+  if (nearestBoundary) {
+    lines.push(
+      `Nearest point on parcel boundary (approx.): ${formatLatLngReadable(
+        nearestBoundary.lat,
+        nearestBoundary.lng
+      )}`
+    );
+  }
+  if (nearestZone && nearestZone.name) {
+    let z = `Closest named campus area (centroid): ${nearestZone.name}`;
+    if (
+      nearestZone.distanceKm != null &&
+      Number.isFinite(nearestZone.distanceKm)
+    ) {
+      z += ` (~${(nearestZone.distanceKm * 1000).toFixed(0)} m)`;
+    }
+    lines.push(z);
+  }
+
+  listEl.classList.remove("empty-state");
+  listEl.innerHTML = `
+    <article class="report-card">
+      <div class="report-body">
+        ${lines.map((t) => `<p>${escapeHtml(t)}</p>`).join("")}
+      </div>
+    </article>`;
+
+  drawer.classList.remove("hidden");
+  if (backdrop) {
+    backdrop.classList.remove("hidden");
+  }
+  drawer.setAttribute("aria-hidden", "false");
+  if (backdrop) {
+    backdrop.setAttribute("aria-hidden", "false");
   }
 }
 
@@ -1141,6 +1561,16 @@ function addCampusParcelAndZones(
 
   const dividedGroup = L.layerGroup();
 
+  const parcelHighlight = L.polygon(payload.parcelLatLng, {
+    pane: "campusZones",
+    weight: 0,
+    opacity: 0,
+    fillOpacity: 0.42,
+    fillColor: CAMPUS_PARCEL_HIGHLIGHT_FILL,
+    interactive: false,
+  });
+  dividedGroup.addLayer(parcelHighlight);
+
   const onlyWholeParcelGap =
     payload.zones.length === 1 &&
     payload.zones[0].id === "parcel-remainder";
@@ -1150,13 +1580,13 @@ function addCampusParcelAndZones(
     payload.zones.length > 0 &&
     !onlyWholeParcelGap;
 
-  /** No visible borders between zones; single tint across all subdivisions */
+  /** Invisible fill: whole campus already tinted; zones are hit targets + tooltips. */
   const zonePolyStyleBase = {
     weight: 0,
     opacity: 0,
-    fillOpacity: 0.36,
-    fillColor: CAMPUS_UNIFIED_ZONE_FILL,
-    color: CAMPUS_UNIFIED_ZONE_FILL,
+    fillOpacity: 0,
+    fillColor: CAMPUS_PARCEL_HIGHLIGHT_FILL,
+    color: CAMPUS_PARCEL_HIGHLIGHT_FILL,
   };
 
   const bindZoneHoverName = (layer, displayName) => {
@@ -1168,14 +1598,16 @@ function addCampusParcelAndZones(
   };
 
   const bindAdminZoneClickIfNeeded = (layer, zoneDisplayName, zoneGeometry) => {
-    if (mapKey !== "admin") {
+    if (mapKey !== "admin" || !isAdminPage) {
       return;
     }
     layer.on("click", (e) => {
-      if (typeof L !== "undefined" && L.DomEvent && e && e.originalEvent) {
+      if (typeof L !== "undefined" && L.DomEvent && e) {
         L.DomEvent.stopPropagation(e);
       }
-      openAdminMapZoneSidebar(zoneDisplayName, zoneGeometry);
+      openAdminMapZoneSidebar(zoneDisplayName, zoneGeometry, {
+        viaProximity: false,
+      });
     });
   };
 
@@ -1216,9 +1648,9 @@ function addCampusParcelAndZones(
         ...zonePolyStyleBase,
       });
       bindZoneHoverName(lyr, def.name);
-      if (mapKey === "admin") {
+      if (mapKey === "admin" && isAdminPage) {
         lyr.on("click", (e) => {
-          if (typeof L !== "undefined" && L.DomEvent && e && e.originalEvent) {
+          if (typeof L !== "undefined" && L.DomEvent && e) {
             L.DomEvent.stopPropagation(e);
           }
           let geometry = null;
@@ -1228,7 +1660,7 @@ function addCampusParcelAndZones(
           } catch (err) {
             geometry = null;
           }
-          openAdminMapZoneSidebar(def.name, geometry);
+          openAdminMapZoneSidebar(def.name, geometry, { viaProximity: false });
         });
       }
       dividedGroup.addLayer(lyr);
@@ -1261,7 +1693,10 @@ function addCampusParcelAndZones(
 
   try {
     const bounds = L.latLngBounds(payload.parcelLatLng);
-    map.fitBounds(bounds, { padding: [28, 28], maxZoom: 18 });
+    map.fitBounds(bounds, {
+      padding: [28, 28],
+      maxZoom: Math.min(18, CAMPUS_MAP_MAX_ZOOM),
+    });
   } catch (e) {
     /* ignore */
   }
@@ -1911,7 +2346,7 @@ function addCampusTiles(map) {
   // Single-host tile URL (recommended by OSM; avoids {s} subdomain issues in some setups)
   L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
     attribution: "© OpenStreetMap contributors",
-    maxZoom: 19,
+    maxZoom: CAMPUS_MAP_MAX_ZOOM,
   }).addTo(map);
 }
 
@@ -1933,6 +2368,8 @@ function initUserSubmitMap() {
   userSubmitMap = L.map("userSubmitMap", {
     scrollWheelZoom: true,
     preferCanvas: true,
+    minZoom: CAMPUS_MAP_MIN_ZOOM,
+    maxZoom: CAMPUS_MAP_MAX_ZOOM,
   }).setView(campusCenter, 18);
   addCampusTiles(userSubmitMap);
 
@@ -1966,6 +2403,8 @@ function ensureUserReportsMap() {
   userReportsMap = L.map("userReportsMap", {
     scrollWheelZoom: true,
     preferCanvas: true,
+    minZoom: CAMPUS_MAP_MIN_ZOOM,
+    maxZoom: CAMPUS_MAP_MAX_ZOOM,
   }).setView(campusCenter, 18);
   addCampusTiles(userReportsMap);
 
@@ -1983,6 +2422,8 @@ function initAdminMap() {
   const mapOpts = {
     scrollWheelZoom: true,
     preferCanvas: true,
+    minZoom: CAMPUS_MAP_MIN_ZOOM,
+    maxZoom: CAMPUS_MAP_MAX_ZOOM,
   };
   if (isAdminPage) {
     mapOpts.zoomControl = false;
@@ -1999,6 +2440,39 @@ function initAdminMap() {
     mapKey: "admin",
   });
 
+  if (isAdminPage) {
+    adminReportsMap.on("click", (e) => {
+      if (!currentUser || currentUser.role !== "admin") {
+        return;
+      }
+      if (!e.latlng) {
+        return;
+      }
+      if (isLatLngInsideCampusParcel(e.latlng.lat, e.latlng.lng)) {
+        const resolved = resolveCampusZoneForPointInParcel(
+          e.latlng.lat,
+          e.latlng.lng
+        );
+        if (resolved && resolved.viaProximity) {
+          openAdminMapZoneSidebar(resolved.name, resolved.geometry, {
+            viaProximity: true,
+            proximityKm: resolved.proximityKm,
+          });
+        }
+        return;
+      }
+      const boundary = nearestBoundaryPointOnCampusParcel(
+        e.latlng.lat,
+        e.latlng.lng
+      );
+      const zoneHint = nearestCampusZoneLabelFromLatLng(
+        e.latlng.lat,
+        e.latlng.lng
+      );
+      openAdminOffParcelSidebar(e.latlng, boundary, zoneHint);
+    });
+  }
+
   fixMapTiles(adminReportsMap);
 }
 
@@ -2006,11 +2480,20 @@ function placeMarker(latlng) {
   if (!userSubmitMap) return;
 
   if (!isLatLngInsideCampusParcel(latlng.lat, latlng.lng)) {
-    setStatus(
-      reportMessage,
-      "Place your pin inside the NBSC campus outline only (click inside the bordered area).",
-      "error"
-    );
+    const snap = nearestBoundaryPointOnCampusParcel(latlng.lat, latlng.lng);
+    let msg =
+      "Place your pin inside the NBSC campus outline only (click inside the bordered area).";
+    if (snap) {
+      msg +=
+        " Nearest boundary point (approx.): " +
+        formatLatLngReadable(snap.lat, snap.lng) +
+        ".";
+    }
+    const nz = nearestCampusZoneLabelFromLatLng(latlng.lat, latlng.lng);
+    if (nz && nz.name && nz.name !== "NBSC Campus") {
+      msg += ` Closest campus area (centroid): ${nz.name}.`;
+    }
+    setStatus(reportMessage, msg, "error");
     return;
   }
 
@@ -2595,17 +3078,19 @@ document.addEventListener("keydown", (event) => {
   }
 });
 
-const adminMapZoneBackdrop = document.getElementById("adminMapZoneBackdrop");
-const adminMapZoneClose = document.getElementById("adminMapZoneClose");
-if (adminMapZoneBackdrop) {
-  adminMapZoneBackdrop.addEventListener("click", () =>
-    closeAdminMapZoneSidebar()
-  );
-}
-if (adminMapZoneClose) {
-  adminMapZoneClose.addEventListener("click", () =>
-    closeAdminMapZoneSidebar()
-  );
+if (isAdminPage) {
+  const adminMapZoneBackdrop = document.getElementById("adminMapZoneBackdrop");
+  const adminMapZoneClose = document.getElementById("adminMapZoneClose");
+  if (adminMapZoneBackdrop) {
+    adminMapZoneBackdrop.addEventListener("click", () =>
+      closeAdminMapZoneSidebar()
+    );
+  }
+  if (adminMapZoneClose) {
+    adminMapZoneClose.addEventListener("click", () =>
+      closeAdminMapZoneSidebar()
+    );
+  }
 }
 
 document
