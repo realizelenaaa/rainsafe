@@ -81,6 +81,8 @@ const CAMPUS_PARCEL_HIGHLIGHT_FILL = "#93c5fd";
 
 /** Legacy alias — zone layers use transparent fill; color kept for Leaflet stroke props. */
 const CAMPUS_UNIFIED_ZONE_FILL = CAMPUS_PARCEL_HIGHLIGHT_FILL;
+const CAMPUS_ROAD_OVERLAY_COLOR = "#3b82f6";
+const CAMPUS_ROAD_BUFFER_METERS_DEFAULT = 6;
 
 /** Campus maps: zoom levels allowed after pan-limit calibration (see applyCampusMapPanLimits). */
 const CAMPUS_MAP_MIN_ZOOM = 15;
@@ -1194,15 +1196,75 @@ function nearestPointOnPolygonGeometryLatLng(lat, lng, geometry) {
 
 /** GeoJSON Polygon geometry from a campus-map-template zone def (for raw / fallback maps). */
 function zoneGeometryFromCampusDef(def) {
-  if (!def || !Array.isArray(def.ring) || def.ring.length < 3) {
+  if (!def) {
     return null;
   }
-  const adjustedRing = expandGuideRingLatLng(def.ring);
-  const ring = closeLatLngRing(
-    adjustedRing && adjustedRing.length >= 3 ? adjustedRing : def.ring
-  );
-  const feat = latLngRingToPolygonFeature(ring);
+  let feat = null;
+  if (Array.isArray(def.ring) && def.ring.length >= 3) {
+    const ring = closeLatLngRing(def.ring);
+    feat = latLngRingToPolygonFeature(ring);
+  } else if (
+    Array.isArray(def.path) &&
+    def.path.length >= 2 &&
+    typeof turf !== "undefined"
+  ) {
+    const widthMeters = Number(def.widthMeters);
+    const halfWidthMeters =
+      Number.isFinite(widthMeters) && widthMeters > 0
+        ? widthMeters / 2
+        : CAMPUS_ROAD_BUFFER_METERS_DEFAULT / 2;
+    const lineCoords = def.path
+      .map((pair) => {
+        if (!Array.isArray(pair) || pair.length < 2) {
+          return null;
+        }
+        const lat = Number(pair[0]);
+        const lng = Number(pair[1]);
+        if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+          return null;
+        }
+        return [lng, lat];
+      })
+      .filter(Boolean);
+    if (lineCoords.length >= 2) {
+      try {
+        const line = turf.lineString(lineCoords);
+        feat = turf.buffer(line, halfWidthMeters, {
+          units: "meters",
+          steps: 16,
+        });
+      } catch (e) {
+        feat = null;
+      }
+    }
+  }
   return feat && feat.geometry ? feat.geometry : null;
+}
+
+function isLatLngInsideAnyRoad(lat, lng) {
+  if (
+    typeof turf === "undefined" ||
+    !Number.isFinite(lat) ||
+    !Number.isFinite(lng)
+  ) {
+    return false;
+  }
+  const pt = turf.point([lng, lat]);
+  for (let i = 0; i < NBSC_ZONE_DEFS.length; i++) {
+    const geom = zoneGeometryFromCampusDef(NBSC_ZONE_DEFS[i]);
+    if (!geom) {
+      continue;
+    }
+    try {
+      const f = rewindPolygonFeature({ type: "Feature", geometry: geom });
+      if (f && turf.booleanPointInPolygon(pt, f)) {
+        return true;
+      }
+    } catch (e) {
+      /* skip */
+    }
+  }
+  return false;
 }
 
 function findContainingCampusZoneAtLatLng(lat, lng) {
@@ -1320,7 +1382,7 @@ function resolveCampusZoneForPointInParcel(lat, lng) {
   if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
     return null;
   }
-  if (!isLatLngInsideCampusParcel(lat, lng)) {
+  if (!isLatLngInsideAnyRoad(lat, lng)) {
     return null;
   }
   const payload = getCampusZonePayload();
@@ -1562,32 +1624,21 @@ function addCampusParcelAndZones(
 
   const dividedGroup = L.layerGroup();
 
-  const parcelHighlight = L.polygon(payload.parcelLatLng, {
-    pane: "campusZones",
-    weight: 0,
-    opacity: 0,
-    fillOpacity: 0.42,
-    fillColor: CAMPUS_PARCEL_HIGHLIGHT_FILL,
-    interactive: false,
-  });
-  dividedGroup.addLayer(parcelHighlight);
-
-  const onlyWholeParcelGap =
-    payload.zones.length === 1 &&
-    payload.zones[0].id === "parcel-remainder";
-
-  const turfOk =
-    typeof turf !== "undefined" &&
-    payload.zones.length > 0 &&
-    !onlyWholeParcelGap;
-
-  /** Invisible fill: whole campus already tinted; zones are hit targets + tooltips. */
-  const zonePolyStyleBase = {
+  /** Visible road surface (single-color, continuous where polygons touch/overlap). */
+  const roadOverlayStyle = {
+    weight: 2,
+    opacity: 0.95,
+    fillOpacity: 0.38,
+    fillColor: CAMPUS_ROAD_OVERLAY_COLOR,
+    color: CAMPUS_ROAD_OVERLAY_COLOR,
+  };
+  /** Per-road hit polygons (kept separate for hover/click functions). */
+  const zoneHitStyleBase = {
     weight: 0,
     opacity: 0,
     fillOpacity: 0,
-    fillColor: CAMPUS_PARCEL_HIGHLIGHT_FILL,
-    color: CAMPUS_PARCEL_HIGHLIGHT_FILL,
+    fillColor: CAMPUS_ROAD_OVERLAY_COLOR,
+    color: CAMPUS_ROAD_OVERLAY_COLOR,
   };
 
   const bindZoneHoverName = (layer, displayName) => {
@@ -1612,59 +1663,78 @@ function addCampusParcelAndZones(
     });
   };
 
-  if (turfOk) {
-    payload.zones.forEach((z) => {
-      if (!z.geometry) {
+  if (NBSC_ZONE_DEFS.length > 0) {
+    const rawRoadFeatures = NBSC_ZONE_DEFS.map((def) => {
+      const geometry = zoneGeometryFromCampusDef(def);
+      return geometry ? { type: "Feature", geometry } : null;
+    }).filter(Boolean);
+
+    let mergedRoadFeature = null;
+    if (typeof turf !== "undefined" && rawRoadFeatures.length > 0) {
+      for (let i = 0; i < rawRoadFeatures.length; i++) {
+        try {
+          mergedRoadFeature = mergedRoadFeature
+            ? turf.union(mergedRoadFeature, rawRoadFeatures[i])
+            : rawRoadFeatures[i];
+        } catch (e) {
+          mergedRoadFeature = null;
+          break;
+        }
+      }
+    }
+
+    if (mergedRoadFeature) {
+      L.geoJSON(mergedRoadFeature, {
+        pane: "campusZones",
+        style: () => ({ ...roadOverlayStyle }),
+        interactive: false,
+      }).addTo(dividedGroup);
+    } else {
+      // Fallback: draw each raw road shape visibly when merge is unavailable.
+      NBSC_ZONE_DEFS.forEach((def) => {
+        const geometry = zoneGeometryFromCampusDef(def);
+        if (!geometry) {
+          return;
+        }
+        const roadLyr = L.geoJSON(
+          { type: "Feature", properties: { name: def.name }, geometry },
+          {
+            pane: "campusZones",
+            style: () => ({ ...roadOverlayStyle }),
+            interactive: false,
+          }
+        );
+        roadLyr.addTo(dividedGroup);
+      });
+    }
+
+    // Keep per-road functional areas for hover names/admin click behavior.
+    NBSC_ZONE_DEFS.forEach((def) => {
+      const geometry = zoneGeometryFromCampusDef(def);
+      if (!geometry) {
         return;
       }
-      const gj = {
-        type: "Feature",
-        properties: { name: z.name, color: z.color },
-        geometry: z.geometry,
-      };
-      L.geoJSON(gj, {
-        pane: "campusZones",
-        style: () => ({ ...zonePolyStyleBase }),
-        onEachFeature: (feat, layer) => {
-          bindZoneHoverName(layer, feat.properties.name);
-          bindAdminZoneClickIfNeeded(
-            layer,
-            feat.properties.name,
-            feat.geometry
-          );
-        },
-      }).addTo(dividedGroup);
-    });
-  } else if (NBSC_ZONE_DEFS.length > 0) {
-    console.warn(
-      "[RainSafe] Drawing campus zones as raw polygons (Turf missing or produced no zones). Overlap clipping disabled — hard-refresh (Ctrl+F5) if this persists."
-    );
-    NBSC_ZONE_DEFS.forEach((def) => {
-      const adjustedRing = expandGuideRingLatLng(def.ring);
-      const ring = closeLatLngRing(
-        adjustedRing && adjustedRing.length >= 3 ? adjustedRing : def.ring
+      const hitLyr = L.geoJSON(
+        { type: "Feature", properties: { name: def.name }, geometry },
+        {
+          pane: "campusZones",
+          style: () => ({ ...zoneHitStyleBase }),
+          onEachFeature: (feat, layer) => {
+            bindZoneHoverName(layer, feat.properties.name);
+            if (mapKey === "admin" && isAdminPage) {
+              layer.on("click", (e) => {
+                if (typeof L !== "undefined" && L.DomEvent && e) {
+                  L.DomEvent.stopPropagation(e);
+                }
+                openAdminMapZoneSidebar(feat.properties.name, feat.geometry, {
+                  viaProximity: false,
+                });
+              });
+            }
+          },
+        }
       );
-      const lyr = L.polygon(ring, {
-        pane: "campusZones",
-        ...zonePolyStyleBase,
-      });
-      bindZoneHoverName(lyr, def.name);
-      if (mapKey === "admin" && isAdminPage) {
-        lyr.on("click", (e) => {
-          if (typeof L !== "undefined" && L.DomEvent && e) {
-            L.DomEvent.stopPropagation(e);
-          }
-          let geometry = null;
-          try {
-            const gj = lyr.toGeoJSON();
-            geometry = gj && gj.geometry ? gj.geometry : null;
-          } catch (err) {
-            geometry = null;
-          }
-          openAdminMapZoneSidebar(def.name, geometry, { viaProximity: false });
-        });
-      }
-      dividedGroup.addLayer(lyr);
+      hitLyr.addTo(dividedGroup);
     });
   }
 
@@ -1673,24 +1743,14 @@ function addCampusParcelAndZones(
       "[RainSafe] campus map build %s · Turf: %s · zone layers: %s",
       String(RAINSAFE_MAP_BUILD),
       typeof turf !== "undefined" ? "yes" : "no",
-      turfOk ? String(payload.zones.length) : "raw"
+      String(NBSC_ZONE_DEFS.length)
     );
   } catch (e) {
     /* ignore */
   }
 
-  const outline = L.polygon(payload.parcelLatLng, {
-    color: "#0f172a",
-    weight: outlineWeight,
-    opacity: 1,
-    fillOpacity: 0,
-    interactive: false,
-  });
-
   dividedGroup.addTo(map);
   raiseDividedZoneStack(dividedGroup);
-  outline.addTo(map);
-  outline.bringToFront();
 
   try {
     const bounds = L.latLngBounds(payload.parcelLatLng);
@@ -1708,10 +1768,10 @@ function addCampusParcelAndZones(
     map,
     mapKey,
     dividedGroup,
-    outline,
+    outline: null,
   };
   registerCampusOverlay(mapKey, bundle);
-  campusPolygon = outline;
+  campusPolygon = null;
   return bundle;
 }
 
@@ -2520,11 +2580,33 @@ async function loadAnalytics() {
 }
 
 function addCampusTiles(map) {
-  // Single-host tile URL (recommended by OSM; avoids {s} subdomain issues in some setups)
-  L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+  const satelliteLayer = L.tileLayer(
+    "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+    {
+      attribution: "Tiles © Esri",
+      maxZoom: CAMPUS_MAP_MAX_ZOOM,
+    }
+  );
+  const twoDLayer = L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
     attribution: "© OpenStreetMap contributors",
     maxZoom: CAMPUS_MAP_MAX_ZOOM,
-  }).addTo(map);
+  });
+
+  satelliteLayer.addTo(map);
+
+  L.control
+    .layers(
+      {
+        Satellite: satelliteLayer,
+        "2D": twoDLayer,
+      },
+      null,
+      {
+        position: "topright",
+        collapsed: false,
+      }
+    )
+    .addTo(map);
 }
 
 function fixMapTiles(map) {
@@ -2656,19 +2738,11 @@ function initAdminMap() {
 function placeMarker(latlng) {
   if (!userSubmitMap) return;
 
-  if (!isLatLngInsideCampusParcel(latlng.lat, latlng.lng)) {
-    const snap = nearestBoundaryPointOnCampusParcel(latlng.lat, latlng.lng);
-    let msg =
-      "Place your pin inside the NBSC campus outline only (click inside the bordered area).";
-    if (snap) {
-      msg +=
-        " Nearest boundary point (approx.): " +
-        formatLatLngReadable(snap.lat, snap.lng) +
-        ".";
-    }
+  if (!isLatLngInsideAnyRoad(latlng.lat, latlng.lng)) {
+    let msg = "Place your pin on a road overlay only.";
     const nz = nearestCampusZoneLabelFromLatLng(latlng.lat, latlng.lng);
-    if (nz && nz.name && nz.name !== "NBSC Campus") {
-      msg += ` Closest campus area (centroid): ${nz.name}.`;
+    if (nz && nz.name && nz.name !== "NBSC Campus" && nz.name !== "NBSC Road") {
+      msg += ` Closest road: ${nz.name}.`;
     }
     setStatus(reportMessage, msg, "error");
     return;
@@ -2694,11 +2768,11 @@ function placeMarker(latlng) {
 
   currentMarker.on("dragend", function () {
     const newPos = this.getLatLng();
-    if (!isLatLngInsideCampusParcel(newPos.lat, newPos.lng)) {
+    if (!isLatLngInsideAnyRoad(newPos.lat, newPos.lng)) {
       this.setLatLng(dragResume);
       setStatus(
         reportMessage,
-        "The pin must stay inside the campus boundary.",
+        "The pin must stay on the road overlay.",
         "error"
       );
       return;
